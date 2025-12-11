@@ -42,7 +42,7 @@ export function loadConfig(): AppConfig {
   return {
     anthropic: {
       apiKey: getEnvVar('ANTHROPIC_API_KEY'),
-      model: getEnvVar('CLAUDE_MODEL', 'claude-sonnet-4-20250514'),
+      model: getEnvVar('CLAUDE_MODEL', 'claude-opus-4-5-20251101'),
     },
     google: {
       credentialsPath: getEnvVar('GOOGLE_CREDENTIALS_PATH', './credentials.json'),
