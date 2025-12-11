@@ -117,8 +117,33 @@ export class URLResearchAgent {
         },
       };
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
-      logger.error('URL Research failed', error);
+      // Extract error message properly for different error types
+      let errorMessage = 'Unknown error occurred';
+
+      if (error instanceof Error) {
+        errorMessage = error.message;
+      } else if (typeof error === 'object' && error !== null) {
+        // Handle Anthropic API errors and other object errors
+        const errorObj = error as Record<string, unknown>;
+        if ('message' in errorObj && typeof errorObj.message === 'string') {
+          errorMessage = errorObj.message;
+        } else if ('error' in errorObj && typeof errorObj.error === 'object') {
+          const nestedError = errorObj.error as Record<string, unknown>;
+          if ('message' in nestedError && typeof nestedError.message === 'string') {
+            errorMessage = nestedError.message;
+          }
+        }
+        // Log the full error object for debugging
+        try {
+          logger.error('URL Research failed with details:', JSON.stringify(error, null, 2));
+        } catch {
+          logger.error('URL Research failed with non-serializable error');
+        }
+      } else if (typeof error === 'string') {
+        errorMessage = error;
+      }
+
+      logger.error(`URL Research error: ${errorMessage}`);
       return {
         success: false,
         error: errorMessage,
@@ -478,29 +503,45 @@ Only return the JSON array.`;
    * Helper method to call Claude API
    */
   private async callClaude(prompt: string): Promise<string> {
-    const response = await retryWithBackoff(
-      async () => {
-        return this.anthropic.messages.create({
-          model: this.config.model,
-          max_tokens: this.config.maxTokens || 4096,
-          temperature: this.config.temperature || 0.3,
-          messages: [
-            {
-              role: 'user',
-              content: prompt,
-            },
-          ],
-        });
-      },
-      3,
-      2000
-    );
+    try {
+      const response = await retryWithBackoff(
+        async () => {
+          return this.anthropic.messages.create({
+            model: this.config.model,
+            max_tokens: this.config.maxTokens || 4096,
+            temperature: this.config.temperature || 0.3,
+            messages: [
+              {
+                role: 'user',
+                content: prompt,
+              },
+            ],
+          });
+        },
+        3,
+        2000
+      );
 
-    const content = response.content[0];
-    if (content.type === 'text') {
-      return content.text;
+      const content = response.content[0];
+      if (content.type === 'text') {
+        return content.text;
+      }
+      throw new Error('Unexpected response type from Claude');
+    } catch (error) {
+      // Re-throw with better error message
+      if (error instanceof Error) {
+        throw error;
+      }
+      // Handle Anthropic API specific errors
+      const errorObj = error as Record<string, unknown>;
+      let message = 'API call failed';
+      if ('message' in errorObj && typeof errorObj.message === 'string') {
+        message = errorObj.message;
+      } else if ('status' in errorObj) {
+        message = `API returned status ${errorObj.status}`;
+      }
+      throw new Error(`Claude API error: ${message}`);
     }
-    throw new Error('Unexpected response type from Claude');
   }
 }
 

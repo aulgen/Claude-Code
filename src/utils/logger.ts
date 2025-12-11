@@ -75,12 +75,51 @@ export class Logger {
     console.log(`${prefix} ${message}`);
 
     if (data !== undefined) {
-      if (typeof data === 'object') {
-        console.log(`${COLORS.dim}${JSON.stringify(data, null, 2)}${COLORS.reset}`);
-      } else {
-        console.log(`${COLORS.dim}${data}${COLORS.reset}`);
+      const formattedData = this.formatData(data);
+      if (formattedData) {
+        console.log(`${COLORS.dim}${formattedData}${COLORS.reset}`);
       }
     }
+  }
+
+  private formatData(data: unknown): string {
+    // Handle Error objects specially
+    if (data instanceof Error) {
+      return `${data.name}: ${data.message}${data.stack ? `\n${data.stack}` : ''}`;
+    }
+
+    // Handle objects that might be API errors
+    if (typeof data === 'object' && data !== null) {
+      const errorObj = data as Record<string, unknown>;
+
+      // Check for common error properties
+      if ('message' in errorObj || 'error' in errorObj || 'status' in errorObj) {
+        const parts: string[] = [];
+        if ('status' in errorObj) parts.push(`Status: ${errorObj.status}`);
+        if ('message' in errorObj) parts.push(`Message: ${errorObj.message}`);
+        if ('error' in errorObj && typeof errorObj.error === 'object') {
+          const nestedError = errorObj.error as Record<string, unknown>;
+          if ('message' in nestedError) parts.push(`Error: ${nestedError.message}`);
+        }
+        if (parts.length > 0) {
+          return parts.join(', ');
+        }
+      }
+
+      // Try to stringify, with fallback
+      try {
+        const jsonStr = JSON.stringify(data, null, 2);
+        // Don't print empty objects
+        if (jsonStr === '{}') {
+          return 'Empty error object - possible API error with no enumerable properties';
+        }
+        return jsonStr;
+      } catch {
+        return `[Object: ${Object.prototype.toString.call(data)}]`;
+      }
+    }
+
+    return String(data);
   }
 
   debug(message: string, data?: unknown): void {
