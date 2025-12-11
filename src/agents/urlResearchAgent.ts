@@ -1,11 +1,12 @@
 /**
  * URL Research Agent
  *
- * This agent analyzes a website URL to:
- * 1. Scrape and extract content from the website
- * 2. Analyze the website's purpose, target audience, and key offerings
- * 3. Generate "People Also Ask" style questions based on the content
- * 4. Identify competitive insights and industry context
+ * This agent performs deep research on a website URL:
+ * 1. Scrapes the main page and discovers internal links
+ * 2. Scrapes additional related pages for comprehensive understanding
+ * 3. Analyzes the website's purpose, target audience, and key offerings
+ * 4. Generates "People Also Ask" style questions based on thorough research
+ * 5. Identifies competitive insights and industry context
  */
 
 import Anthropic from '@anthropic-ai/sdk';
@@ -20,7 +21,7 @@ import {
 } from '../types';
 import { createLogger } from '../utils/logger';
 import { getConfig } from '../utils/config';
-import { cleanText, truncate, extractDomain, retryWithBackoff, extractJson, safeJsonParse } from '../utils/helpers';
+import { cleanText, truncate, extractDomain, retryWithBackoff, extractJson, safeJsonParse, sleep } from '../utils/helpers';
 
 const logger = createLogger('URLResearchAgent');
 
@@ -34,9 +35,15 @@ interface ScrapedContent {
   rawText: string;
 }
 
+interface ScrapedPage {
+  url: string;
+  content: ScrapedContent;
+}
+
 export class URLResearchAgent {
   private config: AgentConfig;
   private anthropic: Anthropic;
+  private maxPagesToScrape: number = 5; // Scrape up to 5 pages for deeper research
 
   constructor() {
     const appConfig = getConfig();
@@ -53,32 +60,49 @@ export class URLResearchAgent {
   }
 
   /**
-   * Main execution method
+   * Main execution method - performs deep research
    */
   async execute(url: string): Promise<AgentResponse<URLResearchResult>> {
     logger.section('URL Research Agent');
     logger.info(`Analyzing URL: ${url}`);
 
     try {
-      // Step 1: Scrape the website
-      logger.info('Scraping website content...');
-      const scrapedContent = await this.scrapeWebsite(url);
-      logger.success(`Scraped ${scrapedContent.paragraphs.length} paragraphs and ${scrapedContent.headings.length} headings`);
+      // Step 1: Scrape the main page
+      logger.info('Scraping main page content...');
+      const mainContent = await this.scrapeWebsite(url);
+      logger.success(`Scraped main page: ${mainContent.paragraphs.length} paragraphs, ${mainContent.headings.length} headings`);
 
-      // Step 2: Analyze the website
+      // Step 2: Discover and scrape related internal pages for deeper research
+      logger.info('Performing deep research - discovering related pages...');
+      const allScrapedPages = await this.scrapeRelatedPages(url, mainContent);
+      logger.success(`Deep research complete: analyzed ${allScrapedPages.length} pages total`);
+
+      // Step 3: Combine all scraped content
+      const combinedContent = this.combineScrapedContent(mainContent, allScrapedPages);
+      logger.info(`Combined content: ${combinedContent.paragraphs.length} paragraphs, ${combinedContent.headings.length} headings`);
+
+      // Step 4: Analyze the website with comprehensive data
       logger.info('Analyzing website content with AI...');
-      const websiteAnalysis = await this.analyzeWebsite(url, scrapedContent);
+      const websiteAnalysis = await this.analyzeWebsite(url, combinedContent);
       logger.success('Website analysis complete');
 
-      // Step 3: Generate People Also Ask questions
-      logger.info('Generating People Also Ask questions...');
-      const peopleAlsoAsk = await this.generatePeopleAlsoAsk(websiteAnalysis, scrapedContent);
+      // Step 5: Generate People Also Ask questions based on thorough research
+      logger.info('Generating People Also Ask questions from research...');
+      const peopleAlsoAsk = await this.generatePeopleAlsoAsk(websiteAnalysis, combinedContent);
       logger.success(`Generated ${peopleAlsoAsk.length} PAA questions`);
+
+      // Validate we have enough data
+      if (peopleAlsoAsk.length === 0) {
+        logger.warn('No PAA questions generated, attempting fallback generation...');
+        const fallbackPAA = await this.generateFallbackPAA(websiteAnalysis);
+        peopleAlsoAsk.push(...fallbackPAA);
+        logger.success(`Fallback generated ${fallbackPAA.length} PAA questions`);
+      }
 
       const result: URLResearchResult = {
         websiteAnalysis,
         peopleAlsoAsk,
-        rawContent: truncate(scrapedContent.rawText, 10000),
+        rawContent: truncate(combinedContent.rawText, 15000),
         scrapedAt: new Date(),
       };
 
@@ -88,7 +112,8 @@ export class URLResearchAgent {
         metadata: {
           url,
           domain: extractDomain(url),
-          contentLength: scrapedContent.rawText.length,
+          contentLength: combinedContent.rawText.length,
+          pagesScraped: allScrapedPages.length + 1,
         },
       };
     } catch (error) {
@@ -102,7 +127,84 @@ export class URLResearchAgent {
   }
 
   /**
-   * Scrape content from a website
+   * Scrape related pages from the website for deeper research
+   */
+  private async scrapeRelatedPages(mainUrl: string, mainContent: ScrapedContent): Promise<ScrapedPage[]> {
+    const scrapedPages: ScrapedPage[] = [];
+    const mainDomain = extractDomain(mainUrl);
+    const visitedUrls = new Set<string>([mainUrl]);
+
+    // Find relevant internal links to scrape
+    const relevantLinks = mainContent.links
+      .filter(link => {
+        try {
+          const fullUrl = new URL(link.href, mainUrl).href;
+          const linkDomain = extractDomain(fullUrl);
+          // Only internal links, not already visited, not anchors/javascript
+          return linkDomain === mainDomain &&
+                 !visitedUrls.has(fullUrl) &&
+                 !link.href.startsWith('#') &&
+                 !link.href.startsWith('javascript:') &&
+                 !link.href.includes('mailto:') &&
+                 !link.href.match(/\.(pdf|jpg|jpeg|png|gif|svg|css|js)$/i);
+        } catch {
+          return false;
+        }
+      })
+      .slice(0, this.maxPagesToScrape - 1); // Reserve one for main page
+
+    logger.info(`Found ${relevantLinks.length} related pages to analyze`);
+
+    for (const link of relevantLinks) {
+      try {
+        const fullUrl = new URL(link.href, mainUrl).href;
+        if (visitedUrls.has(fullUrl)) continue;
+        visitedUrls.add(fullUrl);
+
+        logger.debug(`Scraping related page: ${link.text || fullUrl}`);
+        await sleep(500); // Rate limiting
+
+        const content = await this.scrapeWebsite(fullUrl);
+        scrapedPages.push({ url: fullUrl, content });
+        logger.debug(`  - Got ${content.paragraphs.length} paragraphs`);
+      } catch (error) {
+        logger.debug(`  - Failed to scrape: ${link.href}`);
+        // Continue with other pages
+      }
+    }
+
+    return scrapedPages;
+  }
+
+  /**
+   * Combine content from multiple scraped pages
+   */
+  private combineScrapedContent(mainContent: ScrapedContent, additionalPages: ScrapedPage[]): ScrapedContent {
+    const allHeadings = new Set(mainContent.headings);
+    const allParagraphs = new Set(mainContent.paragraphs);
+    const allLinks = [...mainContent.links];
+    let allRawText = mainContent.rawText;
+
+    for (const page of additionalPages) {
+      page.content.headings.forEach(h => allHeadings.add(h));
+      page.content.paragraphs.forEach(p => allParagraphs.add(p));
+      allLinks.push(...page.content.links);
+      allRawText += '\n\n' + page.content.rawText;
+    }
+
+    return {
+      title: mainContent.title,
+      description: mainContent.description,
+      headings: Array.from(allHeadings).slice(0, 100),
+      paragraphs: Array.from(allParagraphs).slice(0, 200),
+      links: allLinks.slice(0, 100),
+      metaKeywords: mainContent.metaKeywords,
+      rawText: truncate(allRawText, 80000),
+    };
+  }
+
+  /**
+   * Scrape content from a single website page
    */
   private async scrapeWebsite(url: string): Promise<ScrapedContent> {
     const response = await retryWithBackoff(
@@ -191,40 +293,41 @@ export class URLResearchAgent {
    * Analyze website content using Claude
    */
   private async analyzeWebsite(url: string, content: ScrapedContent): Promise<WebsiteAnalysis> {
-    const prompt = `Analyze this website and provide a comprehensive analysis in JSON format.
+    const prompt = `You are a market research expert. Analyze this website content and provide a comprehensive analysis.
 
 URL: ${url}
 Title: ${content.title}
 Description: ${content.description}
 
-Headings:
-${content.headings.slice(0, 30).join('\n')}
+All Headings Found:
+${content.headings.slice(0, 50).join('\n')}
 
-Content Excerpts:
-${content.paragraphs.slice(0, 30).join('\n\n')}
+Content Excerpts (from multiple pages):
+${content.paragraphs.slice(0, 50).join('\n\n')}
 
 Meta Keywords: ${content.metaKeywords.join(', ')}
 
-Provide a JSON response with the following structure:
+Based on this comprehensive research, provide a detailed JSON analysis:
 {
   "url": "${url}",
-  "title": "The website's title or name",
-  "description": "A comprehensive description of what the website is about (2-3 sentences)",
-  "mainTopics": ["Array of 5-8 main topics covered by the website"],
-  "targetAudience": ["Array of 3-5 target audience segments"],
-  "industryContext": "The industry or sector this website operates in",
-  "keyProducts": ["Array of key products if applicable, or empty array"],
-  "keyServices": ["Array of key services if applicable, or empty array"],
-  "uniqueSellingPoints": ["Array of 3-5 unique value propositions"],
-  "brandVoice": "Description of the brand's tone and voice (professional, casual, technical, etc.)",
-  "contentThemes": ["Array of 5-7 recurring content themes"]
+  "title": "The website's title or brand name",
+  "description": "A comprehensive description of what the website offers and its value proposition (3-4 sentences)",
+  "mainTopics": ["List 8-10 main topics, services, or areas this website covers"],
+  "targetAudience": ["List 5-7 specific target audience segments who would use this website"],
+  "industryContext": "Detailed description of the industry/sector (e.g., 'Medical malpractice insurance for healthcare professionals')",
+  "keyProducts": ["List specific products offered, if any"],
+  "keyServices": ["List specific services offered"],
+  "uniqueSellingPoints": ["List 5-7 unique value propositions or differentiators"],
+  "brandVoice": "Describe the brand's communication style and tone in detail",
+  "contentThemes": ["List 8-10 recurring themes or topics in the content"]
 }
 
-Return ONLY the JSON object, no additional text.`;
+Be thorough and specific based on the scraped content. Return ONLY the JSON object.`;
 
     const response = await this.callClaude(prompt);
-    const jsonStr = extractJson(response) || response;
+    logger.debug('Website analysis raw response length: ' + response.length);
 
+    const jsonStr = extractJson(response) || response;
     const analysis = safeJsonParse<WebsiteAnalysis>(jsonStr, {
       url,
       title: content.title,
@@ -242,58 +345,132 @@ Return ONLY the JSON object, no additional text.`;
     // Ensure URL is set
     analysis.url = url;
 
+    // Log if we got minimal data
+    if (analysis.mainTopics.length === 0) {
+      logger.warn('Website analysis returned no main topics - content may be insufficient');
+    }
+
     return analysis;
   }
 
   /**
-   * Generate People Also Ask questions
+   * Generate People Also Ask questions based on thorough research
    */
   private async generatePeopleAlsoAsk(
     analysis: WebsiteAnalysis,
     content: ScrapedContent
   ): Promise<PeopleAlsoAskQuestion[]> {
-    const prompt = `Based on this website analysis, generate "People Also Ask" style questions that users would search for.
+    // Build comprehensive context for PAA generation
+    const topicsContext = analysis.mainTopics.length > 0
+      ? analysis.mainTopics.join(', ')
+      : content.headings.slice(0, 10).join(', ');
 
-Website: ${analysis.title}
-Industry: ${analysis.industryContext}
-Main Topics: ${analysis.mainTopics.join(', ')}
-Target Audience: ${analysis.targetAudience.join(', ')}
-Products/Services: ${[...analysis.keyProducts || [], ...analysis.keyServices || []].join(', ')}
+    const audienceContext = analysis.targetAudience.length > 0
+      ? analysis.targetAudience.join(', ')
+      : 'general website visitors';
 
-Content Context:
-${content.headings.slice(0, 20).join('\n')}
+    const servicesContext = [...(analysis.keyProducts || []), ...(analysis.keyServices || [])].join(', ') || 'various services';
 
-Generate 15-20 diverse questions that cover:
-1. Informational queries (what, how, why questions about the topic)
-2. Navigational queries (finding specific things)
-3. Transactional queries (buying, signing up, pricing)
-4. Commercial investigation (comparisons, reviews, alternatives)
+    const prompt = `You are an SEO expert. Generate realistic "People Also Ask" questions that users would search for related to this website.
 
-Return a JSON array with this structure:
+WEBSITE CONTEXT:
+- Website: ${analysis.title}
+- Industry: ${analysis.industryContext}
+- Main Topics: ${topicsContext}
+- Target Audience: ${audienceContext}
+- Products/Services: ${servicesContext}
+- Brand Voice: ${analysis.brandVoice}
+
+CONTENT THEMES FROM RESEARCH:
+${content.headings.slice(0, 30).map(h => `- ${h}`).join('\n')}
+
+CONTENT EXCERPTS:
+${content.paragraphs.slice(0, 15).join('\n')}
+
+TASK:
+Generate 20 realistic "People Also Ask" questions that potential customers would search for. These should be questions that would appear in Google's PAA boxes for searches related to this business.
+
+Categories to cover:
+1. INFORMATIONAL (5-6 questions): "What is...", "How does...", "Why do..."
+2. COMPARISON (3-4 questions): "What's the difference between...", "X vs Y..."
+3. COST/PRICING (3-4 questions): "How much does...", "What's the cost of..."
+4. PROCESS (3-4 questions): "How to...", "Steps to...", "Process for..."
+5. SPECIFIC TO INDUSTRY (4-5 questions): Questions specific to ${analysis.industryContext}
+
+Return a JSON array with EXACTLY this structure (no deviations):
 [
   {
-    "question": "The question text",
+    "question": "Full question text ending with ?",
     "relatedTopics": ["topic1", "topic2"],
-    "searchIntent": "informational|navigational|transactional|commercial",
-    "estimatedRelevance": 0.0-1.0
+    "searchIntent": "informational",
+    "estimatedRelevance": 0.9
   }
 ]
 
-Return ONLY the JSON array, no additional text.`;
+Valid searchIntent values: "informational", "navigational", "transactional", "commercial"
+estimatedRelevance should be between 0.5 and 1.0
+
+Return ONLY the JSON array, nothing else.`;
+
+    const response = await this.callClaude(prompt);
+    logger.debug('PAA generation raw response length: ' + response.length);
+    logger.debug('PAA response preview: ' + response.substring(0, 200));
+
+    const jsonStr = extractJson(response) || response;
+    const questions = safeJsonParse<PeopleAlsoAskQuestion[]>(jsonStr, []);
+
+    logger.debug(`Parsed ${questions.length} PAA questions from response`);
+
+    // Validate and clean the questions
+    const validQuestions = questions
+      .filter(q => q && q.question && typeof q.question === 'string' && q.question.length > 10)
+      .map(q => ({
+        question: q.question.trim(),
+        relatedTopics: Array.isArray(q.relatedTopics) ? q.relatedTopics : [],
+        searchIntent: ['informational', 'navigational', 'transactional', 'commercial'].includes(q.searchIntent)
+          ? q.searchIntent
+          : 'informational',
+        estimatedRelevance: typeof q.estimatedRelevance === 'number' ? q.estimatedRelevance : 0.7,
+      }));
+
+    return validQuestions;
+  }
+
+  /**
+   * Fallback PAA generation when primary method fails
+   */
+  private async generateFallbackPAA(analysis: WebsiteAnalysis): Promise<PeopleAlsoAskQuestion[]> {
+    const prompt = `Generate 15 common "People Also Ask" questions for a business in the "${analysis.industryContext}" industry.
+
+Business context:
+- Name: ${analysis.title}
+- Focus areas: ${analysis.mainTopics.slice(0, 5).join(', ') || 'general services'}
+- Target customers: ${analysis.targetAudience.slice(0, 3).join(', ') || 'general audience'}
+
+Generate questions covering:
+- What the service/product is
+- How it works
+- Costs and pricing
+- Benefits and advantages
+- Common concerns
+- Comparison with alternatives
+
+Return as JSON array:
+[{"question": "Question?", "relatedTopics": ["topic"], "searchIntent": "informational", "estimatedRelevance": 0.8}]
+
+Only return the JSON array.`;
 
     const response = await this.callClaude(prompt);
     const jsonStr = extractJson(response) || response;
-
     const questions = safeJsonParse<PeopleAlsoAskQuestion[]>(jsonStr, []);
 
-    // Validate and clean the questions
     return questions
-      .filter(q => q.question && q.question.length > 10)
+      .filter(q => q && q.question && q.question.length > 10)
       .map(q => ({
         question: q.question,
         relatedTopics: q.relatedTopics || [],
         searchIntent: q.searchIntent || 'informational',
-        estimatedRelevance: typeof q.estimatedRelevance === 'number' ? q.estimatedRelevance : 0.5,
+        estimatedRelevance: q.estimatedRelevance || 0.7,
       }));
   }
 

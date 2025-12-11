@@ -25,6 +25,9 @@ import { generateSimpleId, retryWithBackoff, extractJson, safeJsonParse } from '
 
 const logger = createLogger('PersonaGeneratorAgent');
 
+// Maximum number of retry attempts for persona generation
+const MAX_GENERATION_ATTEMPTS = 3;
+
 export class PersonaGeneratorAgent {
   private config: AgentConfig;
   private anthropic: Anthropic;
@@ -103,7 +106,7 @@ export class PersonaGeneratorAgent {
   }
 
   /**
-   * Generate personas using Claude
+   * Generate personas using Claude with retry logic
    */
   private async generatePersonas(
     analysis: WebsiteAnalysis,
@@ -111,14 +114,104 @@ export class PersonaGeneratorAgent {
     sampleOutputs?: string[],
     count: number = 5
   ): Promise<Persona[]> {
-    const prompt = this.buildPersonaPrompt(analysis, paaQuestions, sampleOutputs, count);
-    const response = await this.callClaude(prompt);
-    const jsonStr = extractJson(response) || response;
+    let lastError: Error | null = null;
 
-    const rawPersonas = safeJsonParse<Partial<Persona>[]>(jsonStr, []);
+    for (let attempt = 1; attempt <= MAX_GENERATION_ATTEMPTS; attempt++) {
+      try {
+        logger.info(`Persona generation attempt ${attempt}/${MAX_GENERATION_ATTEMPTS}`);
 
-    // Process and validate personas
-    return rawPersonas.slice(0, count).map((raw, index) => this.validateAndEnrichPersona(raw, index));
+        const prompt = this.buildPersonaPrompt(analysis, paaQuestions, sampleOutputs, count, attempt > 1);
+        const response = await this.callClaude(prompt);
+
+        logger.debug(`Raw response length: ${response.length} characters`);
+
+        // Try multiple JSON extraction strategies
+        const personas = this.parsePersonasFromResponse(response, count);
+
+        if (personas.length > 0) {
+          logger.success(`Successfully parsed ${personas.length} personas on attempt ${attempt}`);
+          return personas;
+        }
+
+        logger.warn(`Attempt ${attempt}: No personas could be parsed from response`);
+        lastError = new Error('Failed to parse personas from response');
+
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error(String(error));
+        logger.warn(`Attempt ${attempt} failed: ${lastError.message}`);
+      }
+
+      // Wait before retrying
+      if (attempt < MAX_GENERATION_ATTEMPTS) {
+        const delay = attempt * 1000;
+        logger.info(`Waiting ${delay}ms before retry...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
+
+    // All attempts failed - throw the last error
+    throw lastError || new Error('Failed to generate personas after all attempts');
+  }
+
+  /**
+   * Parse personas from Claude's response using multiple strategies
+   */
+  private parsePersonasFromResponse(response: string, count: number): Persona[] {
+    // Strategy 1: Try extracting JSON array directly
+    const jsonStr = extractJson(response);
+    if (jsonStr) {
+      logger.debug('Strategy 1: Attempting to parse extracted JSON');
+      const parsed = safeJsonParse<Partial<Persona>[]>(jsonStr, []);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        logger.debug(`Strategy 1 succeeded: Found ${parsed.length} personas`);
+        return parsed.slice(0, count).map((raw, index) => this.validateAndEnrichPersona(raw, index));
+      }
+    }
+
+    // Strategy 2: Try parsing the whole response as JSON
+    logger.debug('Strategy 2: Attempting to parse entire response as JSON');
+    const directParse = safeJsonParse<Partial<Persona>[]>(response.trim(), []);
+    if (Array.isArray(directParse) && directParse.length > 0) {
+      logger.debug(`Strategy 2 succeeded: Found ${directParse.length} personas`);
+      return directParse.slice(0, count).map((raw, index) => this.validateAndEnrichPersona(raw, index));
+    }
+
+    // Strategy 3: Look for JSON between code fences
+    logger.debug('Strategy 3: Looking for JSON in code fences');
+    const codeFenceMatch = response.match(/```(?:json)?\s*([\s\S]*?)```/);
+    if (codeFenceMatch) {
+      const fencedContent = codeFenceMatch[1].trim();
+      const fencedParse = safeJsonParse<Partial<Persona>[]>(fencedContent, []);
+      if (Array.isArray(fencedParse) && fencedParse.length > 0) {
+        logger.debug(`Strategy 3 succeeded: Found ${fencedParse.length} personas`);
+        return fencedParse.slice(0, count).map((raw, index) => this.validateAndEnrichPersona(raw, index));
+      }
+    }
+
+    // Strategy 4: Try to find individual persona objects
+    logger.debug('Strategy 4: Attempting to find individual persona objects');
+    const personaMatches = response.match(/\{[^{}]*"name"[^{}]*\}/g);
+    if (personaMatches && personaMatches.length > 0) {
+      const individualPersonas: Partial<Persona>[] = [];
+      for (const match of personaMatches) {
+        try {
+          const parsed = JSON.parse(match) as Partial<Persona>;
+          if (parsed && parsed.name) {
+            individualPersonas.push(parsed);
+          }
+        } catch {
+          // Skip invalid JSON
+        }
+      }
+      if (individualPersonas.length > 0) {
+        logger.debug(`Strategy 4 succeeded: Found ${individualPersonas.length} personas`);
+        return individualPersonas.slice(0, count).map((raw, index) => this.validateAndEnrichPersona(raw, index));
+      }
+    }
+
+    logger.warn('All parsing strategies failed');
+    logger.debug(`Response preview (first 500 chars): ${response.substring(0, 500)}...`);
+    return [];
   }
 
   /**
@@ -128,31 +221,54 @@ export class PersonaGeneratorAgent {
     analysis: WebsiteAnalysis,
     paaQuestions: PeopleAlsoAskQuestion[],
     sampleOutputs?: string[],
-    count: number = 5
+    count: number = 5,
+    isRetry: boolean = false
   ): string {
-    const paaContext = paaQuestions
-      .slice(0, 15)
-      .map(q => `- ${q.question} (${q.searchIntent})`)
-      .join('\n');
+    // Build PAA context - handle empty arrays gracefully
+    const paaContext = paaQuestions.length > 0
+      ? paaQuestions
+          .slice(0, 15)
+          .map(q => `- ${q.question} (${q.searchIntent})`)
+          .join('\n')
+      : 'No specific questions available - infer typical questions based on the industry and target audience.';
 
     const sampleContext = sampleOutputs && sampleOutputs.length > 0
       ? `\n\nSample outputs/content style to consider:\n${sampleOutputs.join('\n\n')}`
+      : '';
+
+    // Build target audience context - handle empty arrays
+    const targetAudienceStr = analysis.targetAudience.length > 0
+      ? analysis.targetAudience.join(', ')
+      : 'General audience interested in ' + analysis.industryContext;
+
+    const productsServices = [...(analysis.keyProducts || []), ...(analysis.keyServices || [])];
+    const productsServicesStr = productsServices.length > 0
+      ? productsServices.join(', ')
+      : 'Services related to ' + analysis.industryContext;
+
+    const uniqueSellingPointsStr = analysis.uniqueSellingPoints.length > 0
+      ? analysis.uniqueSellingPoints.join(', ')
+      : 'Quality service and expertise in ' + analysis.industryContext;
+
+    // Add retry-specific instructions
+    const retryInstructions = isRetry
+      ? `\n\n**IMPORTANT**: This is a retry attempt. The previous response could not be parsed. Please ensure you return ONLY a valid JSON array with no additional text, markdown formatting, or code fences. Start your response directly with [ and end with ].`
       : '';
 
     return `You are an expert user researcher and marketing strategist. Based on the following website analysis, create ${count} detailed and distinct user personas.
 
 ## Website Analysis
 
-**Website:** ${analysis.title}
-**Industry:** ${analysis.industryContext}
-**Description:** ${analysis.description}
+**Website:** ${analysis.title || 'Website'}
+**Industry:** ${analysis.industryContext || 'General'}
+**Description:** ${analysis.description || 'A business website'}
 
-**Main Topics:** ${analysis.mainTopics.join(', ')}
-**Target Audience Segments:** ${analysis.targetAudience.join(', ')}
-**Products/Services:** ${[...analysis.keyProducts || [], ...analysis.keyServices || []].join(', ')}
-**Unique Value Props:** ${analysis.uniqueSellingPoints.join(', ')}
-**Brand Voice:** ${analysis.brandVoice}
-**Content Themes:** ${analysis.contentThemes.join(', ')}
+**Main Topics:** ${analysis.mainTopics.length > 0 ? analysis.mainTopics.join(', ') : analysis.industryContext}
+**Target Audience Segments:** ${targetAudienceStr}
+**Products/Services:** ${productsServicesStr}
+**Unique Value Props:** ${uniqueSellingPointsStr}
+**Brand Voice:** ${analysis.brandVoice || 'Professional'}
+**Content Themes:** ${analysis.contentThemes.length > 0 ? analysis.contentThemes.join(', ') : analysis.industryContext}
 
 ## People Also Ask Questions
 
@@ -174,8 +290,13 @@ Ensure diversity in:
 - Technical sophistication levels
 - Decision-making authority
 - Geographic considerations (if applicable)
+${retryInstructions}
 
-Return a JSON array with exactly ${count} personas using this structure:
+## Required JSON Output Format
+
+You MUST return a valid JSON array with exactly ${count} personas. Do not include any text before or after the JSON. Do not use markdown code fences. Start your response with [ and end with ].
+
+Each persona in the array must have this exact structure:
 [
   {
     "name": "A realistic first and last name",
@@ -186,7 +307,7 @@ Return a JSON array with exactly ${count} personas using this structure:
       "occupation": "Job title and industry",
       "location": "Geographic location type (e.g., 'Urban, East Coast US')",
       "educationLevel": "Highest education level",
-      "incomeLevel": "Income bracket (optional)"
+      "incomeLevel": "Income bracket (optional, can be null)"
     },
     "behavior": {
       "onlineHabits": ["Array of 3-5 online behaviors"],
@@ -210,7 +331,7 @@ Return a JSON array with exactly ${count} personas using this structure:
   }
 ]
 
-Return ONLY the JSON array, no additional text or explanation.`;
+CRITICAL: Return ONLY the JSON array starting with [ and ending with ]. No other text.`;
   }
 
   /**
@@ -219,37 +340,54 @@ Return ONLY the JSON array, no additional text or explanation.`;
   private validateAndEnrichPersona(raw: Partial<Persona>, index: number): Persona {
     const id = generateSimpleId();
 
+    // Helper to ensure array values
+    const ensureArray = (val: unknown, defaults: string[]): string[] => {
+      if (Array.isArray(val) && val.length > 0) {
+        return val.map(v => String(v));
+      }
+      return defaults;
+    };
+
+    // Validate journey stage
+    const validJourneyStages = ['awareness', 'consideration', 'decision', 'retention'] as const;
+    const journeyStage = raw.journeyStage && validJourneyStages.includes(raw.journeyStage as typeof validJourneyStages[number])
+      ? raw.journeyStage
+      : 'consideration';
+
+    // Log what we're processing for debugging
+    logger.debug(`Processing persona ${index + 1}: ${raw.name || 'unnamed'}`);
+
     return {
       id,
-      name: raw.name || `Persona ${index + 1}`,
-      title: raw.title || 'User Persona',
-      bio: raw.bio || 'A typical user of the website.',
+      name: (typeof raw.name === 'string' && raw.name.trim()) ? raw.name.trim() : `Persona ${index + 1}`,
+      title: (typeof raw.title === 'string' && raw.title.trim()) ? raw.title.trim() : 'User Persona',
+      bio: (typeof raw.bio === 'string' && raw.bio.trim()) ? raw.bio.trim() : 'A typical user of the website.',
       demographics: {
         ageRange: raw.demographics?.ageRange || '25-54',
         occupation: raw.demographics?.occupation || 'Professional',
         location: raw.demographics?.location || 'United States',
         educationLevel: raw.demographics?.educationLevel || 'Bachelor\'s degree',
-        incomeLevel: raw.demographics?.incomeLevel,
+        incomeLevel: raw.demographics?.incomeLevel || undefined,
       },
       behavior: {
-        onlineHabits: raw.behavior?.onlineHabits || ['Uses search engines', 'Reads reviews'],
-        preferredChannels: raw.behavior?.preferredChannels || ['Email', 'Website'],
+        onlineHabits: ensureArray(raw.behavior?.onlineHabits, ['Uses search engines', 'Reads reviews', 'Compares options online']),
+        preferredChannels: ensureArray(raw.behavior?.preferredChannels, ['Email', 'Website', 'Social media']),
         decisionMakingStyle: raw.behavior?.decisionMakingStyle || 'Research-driven',
-        informationSources: raw.behavior?.informationSources || ['Google', 'Industry publications'],
+        informationSources: ensureArray(raw.behavior?.informationSources, ['Google', 'Industry publications', 'Peer recommendations']),
       },
       painPoints: {
-        challenges: raw.painPoints?.challenges || ['Finding reliable information'],
-        frustrations: raw.painPoints?.frustrations || ['Unclear pricing'],
-        unmetNeeds: raw.painPoints?.unmetNeeds || ['Better customer support'],
+        challenges: ensureArray(raw.painPoints?.challenges, ['Finding reliable information', 'Comparing options']),
+        frustrations: ensureArray(raw.painPoints?.frustrations, ['Unclear pricing', 'Lack of transparency']),
+        unmetNeeds: ensureArray(raw.painPoints?.unmetNeeds, ['Better customer support', 'More detailed information']),
       },
       goals: {
-        primaryGoals: raw.goals?.primaryGoals || ['Solve their problem'],
-        secondaryGoals: raw.goals?.secondaryGoals || ['Save time'],
-        motivations: raw.goals?.motivations || ['Efficiency', 'Quality'],
+        primaryGoals: ensureArray(raw.goals?.primaryGoals, ['Solve their problem', 'Make an informed decision']),
+        secondaryGoals: ensureArray(raw.goals?.secondaryGoals, ['Save time', 'Stay within budget']),
+        motivations: ensureArray(raw.goals?.motivations, ['Efficiency', 'Quality', 'Peace of mind']),
       },
-      typicalQuestions: raw.typicalQuestions || ['How does this work?', 'What are the benefits?'],
-      preferredContentFormat: raw.preferredContentFormat || ['Articles', 'Videos'],
-      journeyStage: raw.journeyStage || 'consideration',
+      typicalQuestions: ensureArray(raw.typicalQuestions, ['How does this work?', 'What are the benefits?', 'How much does it cost?']),
+      preferredContentFormat: ensureArray(raw.preferredContentFormat, ['Articles', 'Videos', 'FAQs']),
+      journeyStage,
       createdAt: new Date(),
     };
   }

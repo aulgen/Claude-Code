@@ -190,15 +190,90 @@ export function safeJsonParse<T>(json: string, defaultValue: T): T {
 
 /**
  * Extract JSON from a string that might contain other text
+ * Uses balanced bracket matching for more accurate extraction
  */
 export function extractJson(text: string): string | null {
-  // Try to find JSON object
-  const objectMatch = text.match(/\{[\s\S]*\}/);
-  if (objectMatch) return objectMatch[0];
+  // First try: Look for JSON array (most common for our persona use case)
+  const arrayStart = text.indexOf('[');
+  if (arrayStart !== -1) {
+    const extracted = extractBalancedJson(text, arrayStart, '[', ']');
+    if (extracted && isValidJson(extracted)) {
+      return extracted;
+    }
+  }
 
-  // Try to find JSON array
+  // Second try: Look for JSON object
+  const objectStart = text.indexOf('{');
+  if (objectStart !== -1) {
+    const extracted = extractBalancedJson(text, objectStart, '{', '}');
+    if (extracted && isValidJson(extracted)) {
+      return extracted;
+    }
+  }
+
+  // Fallback: Use simple regex match (less accurate but might catch edge cases)
   const arrayMatch = text.match(/\[[\s\S]*\]/);
-  if (arrayMatch) return arrayMatch[0];
+  if (arrayMatch && isValidJson(arrayMatch[0])) {
+    return arrayMatch[0];
+  }
+
+  const objectMatch = text.match(/\{[\s\S]*\}/);
+  if (objectMatch && isValidJson(objectMatch[0])) {
+    return objectMatch[0];
+  }
 
   return null;
+}
+
+/**
+ * Extract JSON with balanced brackets
+ */
+function extractBalancedJson(text: string, startIndex: number, openChar: string, closeChar: string): string | null {
+  let depth = 0;
+  let inString = false;
+  let escapeNext = false;
+
+  for (let i = startIndex; i < text.length; i++) {
+    const char = text[i];
+
+    if (escapeNext) {
+      escapeNext = false;
+      continue;
+    }
+
+    if (char === '\\' && inString) {
+      escapeNext = true;
+      continue;
+    }
+
+    if (char === '"') {
+      inString = !inString;
+      continue;
+    }
+
+    if (inString) continue;
+
+    if (char === openChar) {
+      depth++;
+    } else if (char === closeChar) {
+      depth--;
+      if (depth === 0) {
+        return text.substring(startIndex, i + 1);
+      }
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Check if a string is valid JSON
+ */
+function isValidJson(str: string): boolean {
+  try {
+    JSON.parse(str);
+    return true;
+  } catch {
+    return false;
+  }
 }
