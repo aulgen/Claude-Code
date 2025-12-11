@@ -60,6 +60,20 @@ export class PersonaGeneratorAgent {
         numberOfPersonas
       );
 
+      // CRITICAL: Validate that we actually generated personas
+      if (!personas || personas.length === 0) {
+        logger.error('No personas were generated - cannot proceed');
+        return {
+          success: false,
+          error: 'Failed to generate personas. The AI response could not be parsed into valid personas.',
+        };
+      }
+
+      // Warn if we got fewer personas than requested
+      if (personas.length < numberOfPersonas) {
+        logger.warn(`Only generated ${personas.length} of ${numberOfPersonas} requested personas`);
+      }
+
       // Generate rationale for persona selection
       const rationale = await this.generateRationale(personas, input.websiteAnalysis);
 

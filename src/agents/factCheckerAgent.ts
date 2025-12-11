@@ -314,24 +314,32 @@ Return ONLY the JSON object.`;
       sourceRelevance: 'Unknown',
     });
 
-    // Create source reference
+    // ALWAYS create source reference to document what was checked
     const sources: VerificationSource[] = [];
-    if (result.foundEvidence && result.foundEvidence !== 'No direct evidence found') {
-      sources.push({
-        url: websiteUrl,
-        title: 'Source Website',
-        snippet: result.foundEvidence,
-        credibilityScore: 0.8,
-        accessedAt: new Date(),
-      });
-    }
+    const hasEvidence = result.foundEvidence &&
+                        result.foundEvidence !== 'No direct evidence found' &&
+                        result.foundEvidence !== 'No evidence found';
+
+    // Always document the source that was checked
+    sources.push({
+      url: websiteUrl,
+      title: hasEvidence ? 'Source Website (Evidence Found)' : 'Source Website (No Direct Evidence)',
+      snippet: hasEvidence ? result.foundEvidence : `Checked against source content. ${result.sourceRelevance}`,
+      credibilityScore: hasEvidence ? 0.8 : 0.3,
+      accessedAt: new Date(),
+    });
+
+    // Build detailed explanation including source information
+    const detailedExplanation = hasEvidence
+      ? `${result.explanation}\n\n**Evidence from source:** "${result.foundEvidence}"\n**Source relevance:** ${result.sourceRelevance}`
+      : `${result.explanation}\n\n**Note:** No direct supporting evidence found in source content.\n**Source relevance:** ${result.sourceRelevance}`;
 
     return {
       claim: claim.claim,
       status: this.validateStatus(result.status),
       confidence: typeof result.confidence === 'number' ? result.confidence : 0.5,
       sources,
-      explanation: result.explanation,
+      explanation: detailedExplanation,
     };
   }
 
@@ -555,6 +563,14 @@ Keep it concise and professional.`;
     output += `| False | ${report.falseCount} |\n`;
     output += `| Outdated | ${report.outdatedCount} |\n\n`;
 
+    // Add verification methodology section
+    output += `## Verification Methodology\n\n`;
+    output += `Each FAQ answer was analyzed as follows:\n`;
+    output += `1. **Claim Extraction:** Factual claims were extracted from each answer\n`;
+    output += `2. **Source Verification:** Claims were checked against the source website content\n`;
+    output += `3. **Evidence Documentation:** Supporting or contradicting evidence was recorded\n`;
+    output += `4. **Recommendation:** Based on verification results, a recommendation was generated\n\n`;
+
     output += `## Executive Summary\n\n${report.summary}\n\n`;
 
     output += `---\n\n## Detailed Results\n\n`;
@@ -563,8 +579,8 @@ Keep it concise and professional.`;
       output += `### ${index + 1}. ${result.question}\n\n`;
       output += `**Verification Score:** ${Math.round(result.overallVerificationScore * 100)}%\n\n`;
 
-      output += `**Claims Analyzed:**\n`;
-      result.claims.forEach(claim => {
+      output += `#### Claims Analyzed\n\n`;
+      result.claims.forEach((claim, claimIndex) => {
         const statusEmoji = {
           verified: '✓',
           partially_verified: '◐',
@@ -572,23 +588,57 @@ Keep it concise and professional.`;
           false: '✗',
           outdated: '⏰',
         }[claim.status];
-        output += `- ${statusEmoji} ${claim.claim}\n`;
-        output += `  - Status: ${claim.status} (${Math.round(claim.confidence * 100)}% confidence)\n`;
-        output += `  - ${claim.explanation}\n`;
+
+        output += `**Claim ${claimIndex + 1}:** ${claim.claim}\n\n`;
+        output += `- **Status:** ${statusEmoji} ${claim.status.replace('_', ' ').toUpperCase()} (${Math.round(claim.confidence * 100)}% confidence)\n`;
+        output += `- **Analysis:** ${claim.explanation}\n`;
+
+        // Document sources with details
         if (claim.sources.length > 0) {
-          output += `  - Sources: ${claim.sources.map(s => s.url).join(', ')}\n`;
+          output += `- **Verification Sources:**\n`;
+          claim.sources.forEach(source => {
+            output += `  - ${source.title}\n`;
+            output += `    - URL: ${source.url}\n`;
+            output += `    - Evidence: ${source.snippet}\n`;
+            output += `    - Credibility Score: ${Math.round(source.credibilityScore * 100)}%\n`;
+          });
+        } else {
+          output += `- **Verification Sources:** No sources could be checked for this claim\n`;
         }
+        output += `\n`;
       });
 
-      output += `\n**Recommendation:** ${result.recommendation.action.toUpperCase()}\n`;
-      output += `- Priority: ${result.recommendation.priority}\n`;
-      output += `- Reasoning: ${result.recommendation.reasoning}\n`;
+      output += `#### Recommendation\n\n`;
+      output += `| Action | Priority | \n`;
+      output += `|--------|----------|\n`;
+      output += `| **${result.recommendation.action.toUpperCase()}** | ${result.recommendation.priority} |\n\n`;
+      output += `**Reasoning:** ${result.recommendation.reasoning}\n\n`;
       if (result.recommendation.suggestedChanges) {
-        output += `- Suggested Changes: ${result.recommendation.suggestedChanges}\n`;
+        output += `**Suggested Changes:** ${result.recommendation.suggestedChanges}\n\n`;
       }
 
-      output += `\n---\n\n`;
+      output += `---\n\n`;
     });
+
+    // Add section for items that couldn't be verified
+    const unverifiedResults = report.results.filter(r =>
+      r.claims.some(c => c.status === 'unverified' || c.status === 'false')
+    );
+
+    if (unverifiedResults.length > 0) {
+      output += `## Items Requiring Attention\n\n`;
+      output += `The following FAQs contain claims that could not be verified or were found to be inaccurate:\n\n`;
+      unverifiedResults.forEach(result => {
+        const problematicClaims = result.claims.filter(c =>
+          c.status === 'unverified' || c.status === 'false'
+        );
+        output += `- **${result.question}**\n`;
+        problematicClaims.forEach(claim => {
+          output += `  - ${claim.status === 'false' ? '❌ FALSE' : '❓ UNVERIFIED'}: ${claim.claim}\n`;
+        });
+      });
+      output += `\n`;
+    }
 
     return output;
   }
