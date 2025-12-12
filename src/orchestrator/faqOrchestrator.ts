@@ -76,7 +76,9 @@ export class FAQOrchestrator {
       // STEP 1: URL Research
       // ========================================
       logger.section('Step 1: URL Research');
-      const urlResearchResult = await this.urlResearchAgent.execute(input.url);
+      const urlResearchResult = await this.urlResearchAgent.execute(input.url, {
+        searchCountry: options.searchCountry,
+      });
 
       if (!urlResearchResult.success || !urlResearchResult.data) {
         throw new Error(`URL Research failed: ${urlResearchResult.error}`);
@@ -330,7 +332,9 @@ export class FAQOrchestrator {
 
     // Step 1: URL Research (0-25%)
     onProgress('URL Research', 10, 'Analyzing website...');
-    const urlResearchResult = await this.urlResearchAgent.execute(input.url);
+    const urlResearchResult = await this.urlResearchAgent.execute(input.url, {
+      searchCountry: options.searchCountry,
+    });
     if (!urlResearchResult.success || !urlResearchResult.data) {
       throw new Error(`URL Research failed: ${urlResearchResult.error}`);
     }

@@ -51,13 +51,19 @@ ${COLORS.bright}Options:${COLORS.reset}
   -p, --personas <number>     Number of personas to generate (default: 5)
   -f, --faqs <number>         Max FAQs per category (default: 5)
   -o, --output <dir>          Output directory (default: ./output)
+  -c, --country <code>        Country for SerpAPI searches (default: us)
   --no-google-docs            Skip Google Docs creation
   --skip-fact-check           Skip fact-checking step
   -h, --help                  Show this help message
 
+${COLORS.bright}Country Codes (SerpAPI - ISO 3166-1 alpha-2):${COLORS.reset}
+  us = USA, gb = UK, au = Australia, ca = Canada, de = Germany
+  Full list: https://serpapi.com/google-countries
+
 ${COLORS.bright}Examples:${COLORS.reset}
   npm run dev -- generate https://example.com
   npm run dev -- generate https://example.com -p 3 -f 10
+  npm run dev -- generate https://example.com -c gb   # UK-based searches
   npm run dev -- generate https://example.com --skip-fact-check
 `);
 }
@@ -105,6 +111,13 @@ async function interactiveMode(): Promise<void> {
   const factCheckInput = await promptUser('Run fact-checking? (y/n, default: y):');
   const skipFactCheck = factCheckInput.toLowerCase() === 'n';
 
+  // Ask for search country (for SerpAPI)
+  console.log(`\n${COLORS.dim}Country targeting for web searches (SerpAPI format - ISO 3166-1 alpha-2):${COLORS.reset}`);
+  console.log(`${COLORS.dim}  Common codes: us (USA), gb (UK), au (Australia), ca (Canada), de (Germany)${COLORS.reset}`);
+  console.log(`${COLORS.dim}  Full list: https://serpapi.com/google-countries${COLORS.reset}`);
+  const countryInput = await promptUser('Enter country code (default: us):');
+  const searchCountry = countryInput.toLowerCase().trim() || 'us';
+
   // Ask for sample outputs
   const sampleInput = await promptUser('Enter sample output text (optional, press Enter to skip):');
   const sampleOutputs = sampleInput ? [sampleInput] : undefined;
@@ -113,6 +126,7 @@ async function interactiveMode(): Promise<void> {
   console.log(`  URL: ${url}`);
   console.log(`  Personas: ${numberOfPersonas}`);
   console.log(`  FAQs per category: ${maxFAQsPerCategory}`);
+  console.log(`  Search country: ${searchCountry.toUpperCase()}`);
   console.log(`  Google Docs: ${saveToGoogleDocs ? 'Yes' : 'No'}`);
   console.log(`  Fact-checking: ${!skipFactCheck ? 'Yes' : 'No'}`);
   console.log();
@@ -131,6 +145,7 @@ async function interactiveMode(): Promise<void> {
       maxFAQsPerCategory,
       saveToGoogleDocs,
       skipFactCheck,
+      searchCountry,
     },
   });
 }
@@ -226,6 +241,7 @@ export async function main(): Promise<void> {
     .option('-p, --personas <number>', 'Number of personas to generate', '5')
     .option('-f, --faqs <number>', 'Max FAQs per category', '5')
     .option('-o, --output <dir>', 'Output directory', './output')
+    .option('-c, --country <code>', 'Country for SerpAPI searches (ISO 3166-1: us, gb, au, ca)', 'us')
     .option('--no-google-docs', 'Skip Google Docs creation')
     .option('--skip-fact-check', 'Skip fact-checking step')
     .action(async (url: string, options: Record<string, string | boolean>) => {
@@ -242,6 +258,7 @@ export async function main(): Promise<void> {
         outputDir: (options.output as string) || './output',
         saveToGoogleDocs: options.googleDocs !== false,
         skipFactCheck: options.skipFactCheck === true,
+        searchCountry: ((options.country as string) || 'us').toLowerCase(),
       };
 
       await runGeneration({ url, options: orchestratorOptions });

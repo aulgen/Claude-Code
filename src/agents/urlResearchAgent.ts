@@ -26,7 +26,7 @@ import {
 import { createLogger } from '../utils/logger';
 import { getConfig } from '../utils/config';
 import { cleanText, truncate, extractDomain, retryWithBackoff, extractJson, safeJsonParse, sleep } from '../utils/helpers';
-import { createWebSearchService, WebSearchService, WebResearchData } from '../services/webSearchService';
+import { createWebSearchService, WebSearchService, WebResearchData, WebSearchOptions } from '../services/webSearchService';
 
 const logger = createLogger('URLResearchAgent');
 
@@ -45,10 +45,18 @@ interface ScrapedPage {
   content: ScrapedContent;
 }
 
+export interface URLResearchOptions {
+  /**
+   * Country code for SerpAPI searches (ISO 3166-1 alpha-2)
+   * Examples: 'us' (USA), 'gb' (UK), 'au' (Australia), 'ca' (Canada)
+   */
+  searchCountry?: string;
+}
+
 export class URLResearchAgent {
   private config: AgentConfig;
   private anthropic: Anthropic;
-  private webSearch: WebSearchService;
+  private webSearch: WebSearchService | null = null;
   private maxPagesToScrape: number = 5; // Scrape up to 5 pages for deeper research
 
   constructor() {
@@ -63,15 +71,29 @@ export class URLResearchAgent {
     this.anthropic = new Anthropic({
       apiKey: appConfig.anthropic.apiKey,
     });
-    this.webSearch = createWebSearchService();
+    // WebSearchService is created in execute() with the provided options
+  }
+
+  /**
+   * Initialize web search service with options
+   */
+  private initWebSearch(options?: URLResearchOptions): void {
+    this.webSearch = createWebSearchService({
+      country: options?.searchCountry,
+    });
   }
 
   /**
    * Main execution method - performs deep research
+   * @param url The URL to research
+   * @param options Optional settings including search country
    */
-  async execute(url: string): Promise<AgentResponse<URLResearchResult>> {
+  async execute(url: string, options?: URLResearchOptions): Promise<AgentResponse<URLResearchResult>> {
     logger.section('URL Research Agent');
     logger.info(`Analyzing URL: ${url}`);
+
+    // Initialize web search with options (country targeting)
+    this.initWebSearch(options);
 
     try {
       // Step 1: Scrape the main page

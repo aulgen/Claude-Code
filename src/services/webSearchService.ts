@@ -46,19 +46,31 @@ export interface WebResearchData {
   riskProfiles: SearchResult[];
 }
 
+export interface WebSearchOptions {
+  /**
+   * Country code for SerpAPI searches (ISO 3166-1 alpha-2)
+   * Examples: 'us' (USA), 'gb' (UK), 'au' (Australia), 'ca' (Canada)
+   */
+  country?: string;
+}
+
 export class WebSearchService {
   private userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36';
   private searchProvider: SearchProvider;
   private serpApiKey?: string;
+  private searchCountry: string;
 
-  constructor() {
+  constructor(options?: WebSearchOptions) {
+    // Set country (default: 'us')
+    this.searchCountry = options?.country?.toLowerCase() || 'us';
+
     try {
       const config = getConfig();
       this.searchProvider = config.search.provider;
       this.serpApiKey = config.search.serpApiKey;
 
       if (this.searchProvider === 'serpapi' && this.serpApiKey) {
-        logger.info('Using SerpAPI for web searches (SERPAPI_KEY configured)');
+        logger.info(`Using SerpAPI for web searches (country: ${this.searchCountry.toUpperCase()})`);
       } else if (this.searchProvider === 'none') {
         logger.info('Web search disabled (DISABLE_WEB_SEARCH=true)');
       } else {
@@ -448,10 +460,12 @@ export class WebSearchService {
 
   /**
    * Perform a web search using SerpAPI (reliable, paid service)
+   * Uses the configured country (gl parameter) for localized results
    */
   private async performSerpApiSearch(query: string): Promise<SearchResult[]> {
     const encodedQuery = encodeURIComponent(query);
-    const url = `https://serpapi.com/search.json?q=${encodedQuery}&api_key=${this.serpApiKey}&engine=google`;
+    // gl = country code (ISO 3166-1 alpha-2), hl = language
+    const url = `https://serpapi.com/search.json?q=${encodedQuery}&api_key=${this.serpApiKey}&engine=google&gl=${this.searchCountry}&hl=en`;
 
     try {
       const response = await retryWithBackoff(
@@ -752,6 +766,6 @@ export class WebSearchService {
   }
 }
 
-export function createWebSearchService(): WebSearchService {
-  return new WebSearchService();
+export function createWebSearchService(options?: WebSearchOptions): WebSearchService {
+  return new WebSearchService(options);
 }

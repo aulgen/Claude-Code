@@ -272,6 +272,12 @@ export interface OrchestratorOptions {
   skipFactCheck?: boolean;
   saveToGoogleDocs?: boolean;
   outputDir?: string;
+  /**
+   * Country code for SerpAPI searches (ISO 3166-1 alpha-2)
+   * Examples: 'us' (USA), 'gb' (UK), 'au' (Australia), 'ca' (Canada)
+   * See: https://serpapi.com/google-countries
+   */
+  searchCountry?: string;
 }
 
 export interface OrchestratorResult {
