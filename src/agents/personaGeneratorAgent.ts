@@ -18,6 +18,7 @@ import {
   PersonaGeneratorOutput,
   WebsiteAnalysis,
   PeopleAlsoAskQuestion,
+  SubspecialtyInfo,
 } from '../types';
 import { createLogger } from '../utils/logger';
 import { getConfig } from '../utils/config';
@@ -27,6 +28,13 @@ const logger = createLogger('PersonaGeneratorAgent');
 
 // Maximum number of retry attempts for persona generation
 const MAX_GENERATION_ATTEMPTS = 3;
+
+interface ExtractedPersonaDefinition {
+  name: string;
+  type: string;
+  description: string;
+  concerns: string[];
+}
 
 export class PersonaGeneratorAgent {
   private config: AgentConfig;
@@ -55,13 +63,42 @@ export class PersonaGeneratorAgent {
     logger.info(`Generating ${numberOfPersonas} personas...`);
 
     try {
-      // Generate personas using Claude
-      const personas = await this.generatePersonas(
-        input.websiteAnalysis,
-        input.peopleAlsoAsk,
-        input.sampleOutputs,
-        numberOfPersonas
-      );
+      let personas: Persona[];
+
+      // Step 1: Try to extract predefined personas from sample outputs
+      if (input.sampleOutputs && input.sampleOutputs.length > 0) {
+        logger.info('Checking sample outputs for predefined persona definitions...');
+        const extractedDefinitions = await this.extractPredefinedPersonas(input.sampleOutputs);
+
+        if (extractedDefinitions.length > 0) {
+          logger.success(`Found ${extractedDefinitions.length} predefined persona definitions in sample content`);
+          // Convert extracted definitions to full personas
+          personas = await this.generatePersonasFromDefinitions(
+            extractedDefinitions,
+            input.websiteAnalysis,
+            input.peopleAlsoAsk
+          );
+        } else {
+          logger.info('No predefined personas found, generating based on research...');
+          personas = await this.generatePersonas(
+            input.websiteAnalysis,
+            input.peopleAlsoAsk,
+            input.sampleOutputs,
+            numberOfPersonas,
+            input.subspecialties
+          );
+        }
+      } else {
+        // No sample outputs - generate personas using subspecialty data
+        logger.info('Generating personas using web research and subspecialty data...');
+        personas = await this.generatePersonas(
+          input.websiteAnalysis,
+          input.peopleAlsoAsk,
+          input.sampleOutputs,
+          numberOfPersonas,
+          input.subspecialties
+        );
+      }
 
       // CRITICAL: Validate that we actually generated personas
       if (!personas || personas.length === 0) {
@@ -106,13 +143,140 @@ export class PersonaGeneratorAgent {
   }
 
   /**
+   * Extract predefined persona definitions from sample content using AI
+   */
+  private async extractPredefinedPersonas(sampleOutputs: string[]): Promise<ExtractedPersonaDefinition[]> {
+    const combinedSamples = sampleOutputs.join('\n\n---\n\n');
+
+    const prompt = `Analyze the following content and extract any EXPLICITLY DEFINED personas or target audience segments.
+
+Look for:
+- Named personas (e.g., "Persona A", "Dr. Smith", etc.)
+- Defined professional types or subspecialties (e.g., "dermatopathologist", "cytopathologist")
+- Specific target audience segments with descriptions
+- Any explicitly listed user types with their characteristics
+
+CONTENT TO ANALYZE:
+${combinedSamples.substring(0, 15000)}
+
+If you find explicitly defined personas, return them as a JSON array:
+[
+  {
+    "name": "Name or title of the persona",
+    "type": "Professional type or subspecialty",
+    "description": "Brief description of who they are",
+    "concerns": ["List of their main concerns or needs"]
+  }
+]
+
+If NO explicit personas are defined in the content, return an empty array: []
+
+IMPORTANT: Only extract personas that are EXPLICITLY defined in the content. Do not infer or create new ones.
+Return ONLY the JSON array.`;
+
+    try {
+      const response = await this.callClaude(prompt);
+      const jsonStr = extractJson(response) || response;
+      const definitions = safeJsonParse<ExtractedPersonaDefinition[]>(jsonStr, []);
+
+      // Validate the extracted definitions
+      return definitions.filter(d =>
+        d && d.name && d.type && d.name.length > 0 && d.type.length > 0
+      );
+    } catch (error) {
+      logger.debug(`Failed to extract personas: ${error instanceof Error ? error.message : String(error)}`);
+      return [];
+    }
+  }
+
+  /**
+   * Generate full personas from extracted definitions
+   */
+  private async generatePersonasFromDefinitions(
+    definitions: ExtractedPersonaDefinition[],
+    analysis: WebsiteAnalysis,
+    paaQuestions: PeopleAlsoAskQuestion[]
+  ): Promise<Persona[]> {
+    const definitionsContext = definitions
+      .map((d, i) => `${i + 1}. ${d.name} (${d.type}): ${d.description}
+   Concerns: ${d.concerns.join(', ')}`)
+      .join('\n\n');
+
+    const prompt = `You are creating detailed user personas based on PREDEFINED persona definitions.
+
+These personas were EXPLICITLY defined in the source content - you MUST create personas for EACH of these:
+
+${definitionsContext}
+
+Website Context:
+- Industry: ${analysis.industryContext}
+- Main Topics: ${analysis.mainTopics.join(', ')}
+
+Create a full persona for EACH of the ${definitions.length} predefined personas above.
+Each persona must match the type and concerns specified.
+
+Return a JSON array with exactly ${definitions.length} personas using this structure:
+[
+  {
+    "name": "A realistic name that fits the persona type",
+    "title": "The persona type from above (e.g., 'The Dermatopathologist')",
+    "bio": "A 2-3 sentence biography incorporating their specific concerns",
+    "demographics": {
+      "ageRange": "Appropriate age range",
+      "occupation": "Their specific professional role",
+      "location": "Geographic location",
+      "educationLevel": "Education level",
+      "incomeLevel": "Income bracket"
+    },
+    "behavior": {
+      "onlineHabits": ["3-5 behaviors"],
+      "preferredChannels": ["3-5 channels"],
+      "decisionMakingStyle": "How they decide",
+      "informationSources": ["3-5 sources"]
+    },
+    "painPoints": {
+      "challenges": ["Include the specific concerns from the definition"],
+      "frustrations": ["3-5 frustrations"],
+      "unmetNeeds": ["2-3 needs"]
+    },
+    "goals": {
+      "primaryGoals": ["2-3 goals"],
+      "secondaryGoals": ["2-3 goals"],
+      "motivations": ["3-4 motivations"]
+    },
+    "typicalQuestions": ["5-7 questions they would ask"],
+    "preferredContentFormat": ["3-5 formats"],
+    "journeyStage": "awareness|consideration|decision|retention"
+  }
+]
+
+CRITICAL: Create exactly ${definitions.length} personas, one for each predefined type. Return ONLY the JSON array.`;
+
+    try {
+      const response = await this.callClaude(prompt);
+      const personas = this.parsePersonasFromResponse(response, definitions.length);
+
+      if (personas.length === 0) {
+        logger.warn('Failed to generate personas from definitions, falling back to standard generation');
+        throw new Error('Failed to parse personas from definitions');
+      }
+
+      return personas;
+    } catch (error) {
+      logger.warn(`Error generating from definitions: ${error instanceof Error ? error.message : String(error)}`);
+      throw error;
+    }
+  }
+
+  /**
    * Generate personas using Claude with retry logic
    */
   private async generatePersonas(
     analysis: WebsiteAnalysis,
     paaQuestions: PeopleAlsoAskQuestion[],
     sampleOutputs?: string[],
-    count: number = 5
+    count: number = 5,
+    subspecialties?: SubspecialtyInfo[]
   ): Promise<Persona[]> {
     let lastError: Error | null = null;
 
@@ -120,7 +284,7 @@ export class PersonaGeneratorAgent {
       try {
         logger.info(`Persona generation attempt ${attempt}/${MAX_GENERATION_ATTEMPTS}`);
 
-        const prompt = this.buildPersonaPrompt(analysis, paaQuestions, sampleOutputs, count, attempt > 1);
+        const prompt = this.buildPersonaPrompt(analysis, paaQuestions, sampleOutputs, count, attempt > 1, subspecialties);
         const response = await this.callClaude(prompt);
 
         logger.debug(`Raw response length: ${response.length} characters`);
@@ -222,7 +386,8 @@ export class PersonaGeneratorAgent {
     paaQuestions: PeopleAlsoAskQuestion[],
     sampleOutputs?: string[],
     count: number = 5,
-    isRetry: boolean = false
+    isRetry: boolean = false,
+    subspecialties?: SubspecialtyInfo[]
   ): string {
     // Build PAA context - handle empty arrays gracefully
     const paaContext = paaQuestions.length > 0
@@ -250,6 +415,29 @@ export class PersonaGeneratorAgent {
       ? analysis.uniqueSellingPoints.join(', ')
       : 'Quality service and expertise in ' + analysis.industryContext;
 
+    // Build subspecialty context - CRITICAL for industry-specific personas
+    let subspecialtyContext = '';
+    let subspecialtyInstructions = '';
+    if (subspecialties && subspecialties.length > 0) {
+      subspecialtyContext = `\n\n## Professional Subspecialties Discovered (IMPORTANT)
+
+The following professional subspecialties/types were discovered through web research. You MUST create personas that represent DIFFERENT subspecialties to ensure comprehensive coverage:
+
+${subspecialties.map((s, i) => `${i + 1}. **${s.name}**
+   - Description: ${s.description.substring(0, 200)}
+   - Risk factors: ${s.riskFactors.join(', ') || 'Various'}
+   - Common concerns: ${s.commonConcerns.slice(0, 2).join('; ') || 'Industry-specific concerns'}`).join('\n\n')}
+`;
+      subspecialtyInstructions = `
+**CRITICAL SUBSPECIALTY REQUIREMENT:**
+- Each persona MUST represent a DIFFERENT professional subspecialty from the list above
+- Do NOT create duplicate subspecialty personas
+- Include the subspecialty in the persona's title (e.g., "The Dermatopathologist", "The Cytopathologist")
+- Tailor their challenges, concerns, and questions to their specific subspecialty
+- If you have more personas than subspecialties, create personas at different career stages (new practitioner, mid-career, retiring)
+`;
+    }
+
     // Add retry-specific instructions
     const retryInstructions = isRetry
       ? `\n\n**IMPORTANT**: This is a retry attempt. The previous response could not be parsed. Please ensure you return ONLY a valid JSON array with no additional text, markdown formatting, or code fences. Start your response directly with [ and end with ].`
@@ -269,7 +457,7 @@ export class PersonaGeneratorAgent {
 **Unique Value Props:** ${uniqueSellingPointsStr}
 **Brand Voice:** ${analysis.brandVoice || 'Professional'}
 **Content Themes:** ${analysis.contentThemes.length > 0 ? analysis.contentThemes.join(', ') : analysis.industryContext}
-
+${subspecialtyContext}
 ## People Also Ask Questions
 
 ${paaContext}
@@ -283,13 +471,14 @@ Create ${count} diverse personas that represent different segments of the target
 3. Pain points and challenges
 4. Goals and motivations
 5. Content preferences
-
+${subspecialtyInstructions}
 Ensure diversity in:
 - Age ranges and life stages
-- Professional backgrounds
+- Professional backgrounds/SUBSPECIALTIES
 - Technical sophistication levels
 - Decision-making authority
 - Geographic considerations (if applicable)
+- Risk profiles and coverage needs
 ${retryInstructions}
 
 ## Required JSON Output Format

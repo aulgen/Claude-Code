@@ -4,6 +4,7 @@
  * Performs web searches to gather external data for deep research:
  * - Real "People Also Ask" questions from search engines
  * - Industry trends and context
+ * - INDUSTRY-SPECIFIC: Professional subspecialties and risk profiles
  * - Competitor information
  * - Market research data
  */
@@ -26,11 +27,20 @@ export interface PAAResult {
   source: string;
 }
 
+export interface SubspecialtyInfo {
+  name: string;
+  description: string;
+  riskFactors: string[];
+  commonConcerns: string[];
+}
+
 export interface WebResearchData {
   paaQuestions: PAAResult[];
   industryInsights: SearchResult[];
   competitorInfo: SearchResult[];
   relatedTopics: string[];
+  subspecialties: SubspecialtyInfo[];
+  riskProfiles: SearchResult[];
 }
 
 export class WebSearchService {
@@ -51,19 +61,29 @@ export class WebSearchService {
       industryInsights: [],
       competitorInfo: [],
       relatedTopics: [],
+      subspecialties: [],
+      riskProfiles: [],
     };
 
     try {
-      // Search for PAA questions
+      // Step 1: Search for SUBSPECIALTIES within the profession/industry
+      logger.info('Searching for professional subspecialties and types...');
+      const subspecialtyData = await this.searchForSubspecialties(topic, industry);
+      results.subspecialties = subspecialtyData.subspecialties;
+      results.riskProfiles = subspecialtyData.riskResults;
+      logger.success(`Found ${results.subspecialties.length} subspecialties/types`);
+
+      await sleep(500);
+
+      // Step 2: Search for PAA questions
       logger.info('Searching for People Also Ask questions...');
-      const paaQuestions = await this.searchForPAAQuestions(topic, industry, keywords);
+      const paaQuestions = await this.searchForPAAQuestions(topic, industry, keywords, results.subspecialties);
       results.paaQuestions = paaQuestions;
       logger.success(`Found ${paaQuestions.length} PAA questions from web search`);
 
-      // Small delay between searches
       await sleep(500);
 
-      // Search for industry insights
+      // Step 3: Search for industry insights
       logger.info('Searching for industry insights...');
       const industryInsights = await this.searchForIndustryInsights(industry, keywords);
       results.industryInsights = industryInsights;
@@ -71,7 +91,7 @@ export class WebSearchService {
 
       await sleep(500);
 
-      // Search for competitor/market info
+      // Step 4: Search for competitor/market info
       logger.info('Searching for market information...');
       const competitorInfo = await this.searchForMarketInfo(topic, industry);
       results.competitorInfo = competitorInfo;
@@ -89,12 +109,181 @@ export class WebSearchService {
   }
 
   /**
-   * Search for "People Also Ask" style questions
+   * Search for professional subspecialties and risk profiles
+   * This is CRITICAL for generating accurate, industry-specific personas
+   */
+  private async searchForSubspecialties(
+    topic: string,
+    industry: string
+  ): Promise<{ subspecialties: SubspecialtyInfo[]; riskResults: SearchResult[] }> {
+    const subspecialties: SubspecialtyInfo[] = [];
+    const riskResults: SearchResult[] = [];
+
+    // Extract the profession from the topic (e.g., "pathologist" from "pathologist malpractice insurance")
+    const profession = this.extractProfession(topic, industry);
+    logger.info(`Researching subspecialties for profession: ${profession}`);
+
+    // Search queries for finding subspecialties
+    const subspecialtyQueries = [
+      `types of ${profession}`,
+      `${profession} subspecialties`,
+      `${profession} specializations`,
+      `different kinds of ${profession}`,
+      `${profession} specialty areas`,
+    ];
+
+    // Search queries for risk profiles
+    const riskQueries = [
+      `${profession} malpractice risk`,
+      `high risk ${profession} specialties`,
+      `${profession} liability claims`,
+      `${profession} insurance risk factors`,
+      `${profession} common lawsuits`,
+    ];
+
+    // Search for subspecialties
+    for (const query of subspecialtyQueries.slice(0, 3)) {
+      try {
+        await sleep(300);
+        const results = await this.performSearch(query);
+
+        // Extract subspecialty information from results
+        const extracted = this.extractSubspecialtiesFromResults(results, profession);
+        for (const sub of extracted) {
+          // Avoid duplicates
+          if (!subspecialties.find(s => s.name.toLowerCase() === sub.name.toLowerCase())) {
+            subspecialties.push(sub);
+          }
+        }
+      } catch (error) {
+        logger.debug(`Subspecialty search failed for: ${query}`);
+      }
+    }
+
+    // Search for risk profiles
+    for (const query of riskQueries.slice(0, 3)) {
+      try {
+        await sleep(300);
+        const results = await this.performSearch(query);
+        riskResults.push(...results.slice(0, 5));
+
+        // Enhance subspecialties with risk information
+        this.enrichSubspecialtiesWithRisk(subspecialties, results);
+      } catch (error) {
+        logger.debug(`Risk search failed for: ${query}`);
+      }
+    }
+
+    return { subspecialties, riskResults: this.deduplicateResults(riskResults) };
+  }
+
+  /**
+   * Extract profession name from topic/industry
+   */
+  private extractProfession(topic: string, industry: string): string {
+    // Common patterns to extract profession
+    const combined = `${topic} ${industry}`.toLowerCase();
+
+    // Try to find profession keywords
+    const professionPatterns = [
+      /(\w+ologist)/i,  // pathologist, radiologist, etc.
+      /(\w+ist)/i,      // dentist, therapist, etc.
+      /(\w+or)/i,       // doctor, contractor, etc.
+      /(\w+er)/i,       // lawyer, teacher, etc.
+      /(\w+ian)/i,      // physician, technician, etc.
+    ];
+
+    for (const pattern of professionPatterns) {
+      const match = combined.match(pattern);
+      if (match) {
+        return match[1];
+      }
+    }
+
+    // Fallback: use the first significant word from topic
+    const words = topic.split(/\s+/).filter(w => w.length > 3);
+    return words[0] || 'professional';
+  }
+
+  /**
+   * Extract subspecialty information from search results
+   */
+  private extractSubspecialtiesFromResults(results: SearchResult[], profession: string): SubspecialtyInfo[] {
+    const subspecialties: SubspecialtyInfo[] = [];
+    const foundNames = new Set<string>();
+
+    // Patterns to find subspecialty names
+    const patterns = [
+      new RegExp(`(\\w+${profession})`, 'gi'),  // dermatopathologist, cytopathologist
+      new RegExp(`(\\w+)\\s+${profession}`, 'gi'),  // surgical pathologist
+      new RegExp(`${profession}\\s+(\\w+)`, 'gi'),  // pathologist assistant
+      /(\w+ology)\s/gi,  // dermatopathology, cytopathology
+    ];
+
+    for (const result of results) {
+      const text = `${result.title} ${result.snippet}`;
+
+      for (const pattern of patterns) {
+        let match;
+        while ((match = pattern.exec(text)) !== null) {
+          const name = match[1] || match[0];
+          const cleanName = name.trim();
+
+          // Filter out common words and already found names
+          if (cleanName.length > 4 &&
+              !foundNames.has(cleanName.toLowerCase()) &&
+              !['the', 'and', 'for', 'with', 'that', 'this'].includes(cleanName.toLowerCase())) {
+            foundNames.add(cleanName.toLowerCase());
+            subspecialties.push({
+              name: this.capitalize(cleanName),
+              description: result.snippet.substring(0, 200),
+              riskFactors: [],
+              commonConcerns: [],
+            });
+          }
+        }
+      }
+    }
+
+    return subspecialties.slice(0, 10); // Limit to top 10
+  }
+
+  /**
+   * Enrich subspecialties with risk information from search results
+   */
+  private enrichSubspecialtiesWithRisk(subspecialties: SubspecialtyInfo[], riskResults: SearchResult[]): void {
+    for (const sub of subspecialties) {
+      const subNameLower = sub.name.toLowerCase();
+
+      for (const result of riskResults) {
+        const textLower = `${result.title} ${result.snippet}`.toLowerCase();
+
+        if (textLower.includes(subNameLower)) {
+          // Extract risk factors from the snippet
+          const riskKeywords = ['high risk', 'liability', 'claims', 'lawsuit', 'malpractice', 'error', 'misdiagnosis'];
+          for (const keyword of riskKeywords) {
+            if (textLower.includes(keyword) && !sub.riskFactors.includes(keyword)) {
+              sub.riskFactors.push(keyword);
+            }
+          }
+
+          // Add concern based on snippet
+          if (result.snippet.length > 20 && sub.commonConcerns.length < 3) {
+            sub.commonConcerns.push(result.snippet.substring(0, 150));
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * Search for "People Also Ask" style questions - now including subspecialty-specific questions
    */
   private async searchForPAAQuestions(
     topic: string,
     industry: string,
-    keywords: string[]
+    keywords: string[],
+    subspecialties: SubspecialtyInfo[]
   ): Promise<PAAResult[]> {
     const allQuestions: PAAResult[] = [];
 
@@ -109,12 +298,16 @@ export class WebSearchService {
       ...keywords.slice(0, 3).map(k => `${k} questions`),
     ];
 
-    for (const query of searchQueries.slice(0, 5)) { // Limit to 5 queries
-      try {
-        await sleep(300); // Rate limiting
-        const results = await this.performSearch(query);
+    // Add subspecialty-specific queries
+    for (const sub of subspecialties.slice(0, 3)) {
+      searchQueries.push(`${sub.name} insurance questions`);
+      searchQueries.push(`${sub.name} malpractice concerns`);
+    }
 
-        // Extract questions from search results
+    for (const query of searchQueries.slice(0, 8)) { // Increased limit
+      try {
+        await sleep(300);
+        const results = await this.performSearch(query);
         const questions = this.extractQuestionsFromResults(results, query);
         allQuestions.push(...questions);
       } catch (error) {
@@ -124,7 +317,7 @@ export class WebSearchService {
 
     // Deduplicate questions
     const uniqueQuestions = this.deduplicateQuestions(allQuestions);
-    return uniqueQuestions.slice(0, 25); // Return top 25 questions
+    return uniqueQuestions.slice(0, 30); // Return top 30 questions
   }
 
   /**
@@ -224,7 +417,6 @@ export class WebSearchService {
     const results: SearchResult[] = [];
     const $ = cheerio.load(html);
 
-    // DuckDuckGo HTML results structure
     $('.result').each((_, element) => {
       const titleEl = $(element).find('.result__title a');
       const snippetEl = $(element).find('.result__snippet');
@@ -234,7 +426,6 @@ export class WebSearchService {
       const snippet = snippetEl.text().trim();
 
       if (title && snippet) {
-        // Clean up DuckDuckGo redirect URLs
         let cleanUrl = url;
         if (url.includes('uddg=')) {
           const match = url.match(/uddg=([^&]+)/);
@@ -243,11 +434,7 @@ export class WebSearchService {
           }
         }
 
-        results.push({
-          title,
-          url: cleanUrl,
-          snippet,
-        });
+        results.push({ title, url: cleanUrl, snippet });
       }
     });
 
@@ -260,7 +447,6 @@ export class WebSearchService {
   private extractQuestionsFromResults(results: SearchResult[], sourceQuery: string): PAAResult[] {
     const questions: PAAResult[] = [];
 
-    // Common question patterns
     const questionPatterns = [
       /what\s+(?:is|are|does|do|should|can|will|would)\s+[^?.!]+\??/gi,
       /how\s+(?:to|do|does|can|should|much|many|long|often)\s+[^?.!]+\??/gi,
@@ -282,39 +468,28 @@ export class WebSearchService {
         if (matches) {
           for (const match of matches) {
             let question = match.trim();
-            // Ensure it ends with a question mark
             if (!question.endsWith('?')) {
               question += '?';
             }
-            // Capitalize first letter
             question = question.charAt(0).toUpperCase() + question.slice(1);
 
-            // Only add if it's a reasonable question length
             if (question.length > 15 && question.length < 150) {
-              questions.push({
-                question,
-                source: sourceQuery,
-              });
+              questions.push({ question, source: sourceQuery });
             }
           }
         }
       }
 
-      // Also check if the title itself is a question
+      // Check if title itself is a question
       if (result.title.includes('?') ||
           result.title.toLowerCase().startsWith('what') ||
           result.title.toLowerCase().startsWith('how') ||
-          result.title.toLowerCase().startsWith('why') ||
-          result.title.toLowerCase().startsWith('when') ||
-          result.title.toLowerCase().startsWith('where')) {
+          result.title.toLowerCase().startsWith('why')) {
         let question = result.title.trim();
         if (!question.endsWith('?')) {
           question += '?';
         }
-        questions.push({
-          question,
-          source: sourceQuery,
-        });
+        questions.push({ question, source: sourceQuery });
       }
     }
 
@@ -329,10 +504,8 @@ export class WebSearchService {
     const unique: PAAResult[] = [];
 
     for (const q of questions) {
-      // Normalize for comparison
       const normalized = q.question.toLowerCase().replace(/[^a-z0-9\s]/g, '').trim();
 
-      // Skip if too similar to existing
       let isDuplicate = false;
       for (const existing of seen) {
         if (this.isSimilar(normalized, existing)) {
@@ -351,17 +524,14 @@ export class WebSearchService {
   }
 
   /**
-   * Check if two strings are similar (simple Jaccard similarity)
+   * Check if two strings are similar
    */
   private isSimilar(a: string, b: string): boolean {
     const wordsA = new Set(a.split(/\s+/));
     const wordsB = new Set(b.split(/\s+/));
-
     const intersection = new Set([...wordsA].filter(x => wordsB.has(x)));
     const union = new Set([...wordsA, ...wordsB]);
-
-    const similarity = intersection.size / union.size;
-    return similarity > 0.7; // 70% similar words = duplicate
+    return intersection.size / union.size > 0.7;
   }
 
   /**
@@ -383,9 +553,7 @@ export class WebSearchService {
   private extractRelatedTopics(data: WebResearchData): string[] {
     const topics = new Set<string>();
 
-    // Extract from PAA questions
     for (const paa of data.paaQuestions) {
-      // Extract key phrases from questions
       const words = paa.question.toLowerCase()
         .replace(/[?.,!]/g, '')
         .split(/\s+/)
@@ -393,7 +561,6 @@ export class WebSearchService {
       words.forEach(w => topics.add(w));
     }
 
-    // Extract from search result titles
     for (const result of [...data.industryInsights, ...data.competitorInfo]) {
       const words = result.title.toLowerCase()
         .replace(/[^a-z0-9\s]/g, '')
@@ -402,7 +569,19 @@ export class WebSearchService {
       words.slice(0, 3).forEach(w => topics.add(w));
     }
 
+    // Add subspecialty names as topics
+    for (const sub of data.subspecialties) {
+      topics.add(sub.name.toLowerCase());
+    }
+
     return Array.from(topics).slice(0, 30);
+  }
+
+  /**
+   * Capitalize first letter
+   */
+  private capitalize(str: string): string {
+    return str.charAt(0).toUpperCase() + str.slice(1);
   }
 }
 

@@ -95,6 +95,7 @@ export class FAQOrchestrator {
         peopleAlsoAsk: urlResearch.peopleAlsoAsk,
         sampleOutputs: input.sampleOutputs,
         numberOfPersonas: options.numberOfPersonas,
+        subspecialties: urlResearch.subspecialties, // Pass subspecialties from web search
       });
 
       if (!personaResult.success || !personaResult.data) {
@@ -103,6 +104,9 @@ export class FAQOrchestrator {
 
       const personas = personaResult.data.personas;
       logger.success(`Generated ${personas.length} personas`);
+      if (urlResearch.subspecialties && urlResearch.subspecialties.length > 0) {
+        logger.info(`Based on ${urlResearch.subspecialties.length} discovered subspecialties`);
+      }
 
       // Save personas to Google Docs
       if (googleDocsEnabled) {
@@ -340,12 +344,16 @@ export class FAQOrchestrator {
       peopleAlsoAsk: urlResearch.peopleAlsoAsk,
       sampleOutputs: input.sampleOutputs,
       numberOfPersonas: options.numberOfPersonas,
+      subspecialties: urlResearch.subspecialties, // Pass subspecialties from web search
     });
     if (!personaResult.success || !personaResult.data) {
       throw new Error(`Persona generation failed: ${personaResult.error}`);
     }
     const personas = personaResult.data.personas;
-    onProgress('Persona Generation', 45, `Created ${personas.length} personas`);
+    const subspecialtyMsg = urlResearch.subspecialties?.length
+      ? ` (${urlResearch.subspecialties.length} subspecialties)`
+      : '';
+    onProgress('Persona Generation', 45, `Created ${personas.length} personas${subspecialtyMsg}`);
 
     // Save personas
     if (googleDocsEnabled) {

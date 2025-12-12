@@ -51,10 +51,19 @@ export interface PeopleAlsoAskQuestion {
   estimatedRelevance: number; // 0-1
 }
 
+export interface SubspecialtyInfo {
+  name: string;
+  description: string;
+  riskFactors: string[];
+  commonConcerns: string[];
+}
+
 export interface URLResearchResult {
   websiteAnalysis: WebsiteAnalysis;
   peopleAlsoAsk: PeopleAlsoAskQuestion[];
   competitorInsights?: string[];
+  subspecialties?: SubspecialtyInfo[];  // Professional subspecialties discovered via web search
+  industryInsights?: string[];          // Industry trends and insights from web search
   rawContent: string;
   scrapedAt: Date;
 }
@@ -111,6 +120,7 @@ export interface PersonaGeneratorInput {
   peopleAlsoAsk: PeopleAlsoAskQuestion[];
   sampleOutputs?: string[];
   numberOfPersonas?: number;
+  subspecialties?: SubspecialtyInfo[];  // Professional subspecialties for persona differentiation
 }
 
 export interface PersonaGeneratorOutput {

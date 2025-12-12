@@ -4,7 +4,7 @@
  * This agent performs deep research on a website URL:
  * 1. Scrapes the main page and discovers internal links
  * 2. Scrapes additional related pages for comprehensive understanding
- * 3. Performs WEB SEARCH to gather external data (PAA questions, industry insights)
+ * 3. PERFORMS WEB SEARCH for external data, subspecialties, and risk profiles
  * 4. Analyzes the website's purpose, target audience, and key offerings
  * 5. Generates "People Also Ask" questions from REAL web search data
  * 6. Identifies competitive insights and industry context
@@ -90,19 +90,19 @@ export class URLResearchAgent {
       const websiteAnalysis = await this.analyzeWebsite(url, combinedContent);
       logger.success('Website analysis complete');
 
-      // Step 5: PERFORM WEB SEARCH for external research data
+      // Step 5: PERFORM WEB SEARCH for external research (subspecialties, PAA, industry data)
       logger.info('Performing web search for external research data...');
       const webResearchData = await this.performWebResearch(websiteAnalysis, combinedContent);
-      logger.success(`Web search complete: ${webResearchData.paaQuestions.length} PAA questions, ${webResearchData.industryInsights.length} industry insights`);
+      logger.success(`Web search complete: ${webResearchData.subspecialties.length} subspecialties, ${webResearchData.paaQuestions.length} PAA questions`);
 
-      // Step 6: Generate People Also Ask questions - combining web search results with AI generation
+      // Step 6: Generate People Also Ask questions using web search data + AI
       logger.info('Generating People Also Ask questions from web research...');
       const peopleAlsoAsk = await this.generatePeopleAlsoAskWithWebData(
         websiteAnalysis,
         combinedContent,
         webResearchData
       );
-      logger.success(`Generated ${peopleAlsoAsk.length} PAA questions (from web + AI)`);
+      logger.success(`Generated ${peopleAlsoAsk.length} PAA questions (web + AI)`);
 
       // Validate we have enough data
       if (peopleAlsoAsk.length === 0) {
@@ -115,6 +115,8 @@ export class URLResearchAgent {
       const result: URLResearchResult = {
         websiteAnalysis,
         peopleAlsoAsk,
+        subspecialties: webResearchData.subspecialties,
+        industryInsights: webResearchData.industryInsights.map(r => r.snippet),
         rawContent: truncate(combinedContent.rawText, 15000),
         scrapedAt: new Date(),
       };
@@ -516,7 +518,7 @@ Only return the JSON array.`;
   }
 
   /**
-   * Perform web search to gather external research data
+   * Perform web search to gather external research data including subspecialties
    */
   private async performWebResearch(
     analysis: WebsiteAnalysis,
@@ -539,12 +541,17 @@ Only return the JSON array.`;
     const industry = analysis.industryContext || 'general business';
 
     try {
-      // Perform comprehensive web research
+      // Perform comprehensive web research including subspecialty discovery
       const webData = await this.webSearch.performDeepResearch(
         mainTopic,
         industry,
         keywords
       );
+
+      logger.info(`Discovered ${webData.subspecialties.length} professional subspecialties`);
+      if (webData.subspecialties.length > 0) {
+        logger.debug(`Subspecialties: ${webData.subspecialties.map(s => s.name).join(', ')}`);
+      }
 
       return webData;
     } catch (error) {
@@ -557,6 +564,8 @@ Only return the JSON array.`;
         industryInsights: [],
         competitorInfo: [],
         relatedTopics: [],
+        subspecialties: [],
+        riskProfiles: [],
       };
     }
   }
