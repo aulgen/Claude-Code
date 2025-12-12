@@ -72,6 +72,15 @@ export class WebSearchService {
   }
 
   /**
+   * Check if an industry string is too generic to be useful for searches
+   */
+  private isGenericIndustry(industry: string): boolean {
+    const genericTerms = ['general', 'business', 'services', 'general business', 'general services', ''];
+    const normalized = industry.toLowerCase().trim();
+    return genericTerms.includes(normalized) || normalized.length < 5;
+  }
+
+  /**
    * Perform comprehensive web research for a topic/industry
    */
   async performDeepResearch(
@@ -79,7 +88,12 @@ export class WebSearchService {
     industry: string,
     keywords: string[]
   ): Promise<WebResearchData> {
-    logger.info(`Performing deep web research for: ${topic} in ${industry}`);
+    // Validate industry - skip if too generic to avoid wasting API credits
+    const hasValidIndustry = !this.isGenericIndustry(industry);
+    if (!hasValidIndustry) {
+      logger.warn(`Industry "${industry}" is too generic - skipping industry-specific searches to save API credits`);
+    }
+    logger.info(`Performing deep web research for: ${topic}${hasValidIndustry ? ` in ${industry}` : ''}`);
 
     const results: WebResearchData = {
       paaQuestions: [],
@@ -92,35 +106,46 @@ export class WebSearchService {
 
     try {
       // Step 1: Search for SUBSPECIALTIES within the profession/industry
-      logger.info('Searching for professional subspecialties and types...');
-      const subspecialtyData = await this.searchForSubspecialties(topic, industry);
-      results.subspecialties = subspecialtyData.subspecialties;
-      results.riskProfiles = subspecialtyData.riskResults;
-      logger.success(`Found ${results.subspecialties.length} subspecialties/types`);
+      // Only search if we have a meaningful industry/topic
+      if (hasValidIndustry || topic.length > 5) {
+        logger.info('Searching for professional subspecialties and types...');
+        const subspecialtyData = await this.searchForSubspecialties(topic, hasValidIndustry ? industry : topic);
+        results.subspecialties = subspecialtyData.subspecialties;
+        results.riskProfiles = subspecialtyData.riskResults;
+        logger.success(`Found ${results.subspecialties.length} subspecialties/types`);
+        await sleep(500);
+      } else {
+        logger.info('Skipping subspecialty search - no meaningful industry/topic');
+      }
 
-      await sleep(500);
-
-      // Step 2: Search for PAA questions
+      // Step 2: Search for PAA questions - always search using topic at minimum
       logger.info('Searching for People Also Ask questions...');
-      const paaQuestions = await this.searchForPAAQuestions(topic, industry, keywords, results.subspecialties);
+      const paaQuestions = await this.searchForPAAQuestions(topic, hasValidIndustry ? industry : topic, keywords, results.subspecialties);
       results.paaQuestions = paaQuestions;
       logger.success(`Found ${paaQuestions.length} PAA questions from web search`);
 
       await sleep(500);
 
-      // Step 3: Search for industry insights
-      logger.info('Searching for industry insights...');
-      const industryInsights = await this.searchForIndustryInsights(industry, keywords);
-      results.industryInsights = industryInsights;
-      logger.success(`Found ${industryInsights.length} industry insights`);
+      // Step 3: Search for industry insights - SKIP if no valid industry
+      if (hasValidIndustry) {
+        logger.info('Searching for industry insights...');
+        const industryInsights = await this.searchForIndustryInsights(industry, keywords);
+        results.industryInsights = industryInsights;
+        logger.success(`Found ${industryInsights.length} industry insights`);
+        await sleep(500);
+      } else {
+        logger.info('Skipping industry insights search - no specific industry identified');
+      }
 
-      await sleep(500);
-
-      // Step 4: Search for competitor/market info
-      logger.info('Searching for market information...');
-      const competitorInfo = await this.searchForMarketInfo(topic, industry);
-      results.competitorInfo = competitorInfo;
-      logger.success(`Found ${competitorInfo.length} market insights`);
+      // Step 4: Search for competitor/market info - SKIP if no valid industry
+      if (hasValidIndustry) {
+        logger.info('Searching for market information...');
+        const competitorInfo = await this.searchForMarketInfo(topic, industry);
+        results.competitorInfo = competitorInfo;
+        logger.success(`Found ${competitorInfo.length} market insights`);
+      } else {
+        logger.info('Skipping market info search - no specific industry identified');
+      }
 
       // Extract related topics from all results
       results.relatedTopics = this.extractRelatedTopics(results);

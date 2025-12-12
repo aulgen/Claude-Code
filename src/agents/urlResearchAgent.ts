@@ -418,15 +418,39 @@ Be thorough and specific based on the scraped content. Return ONLY the JSON obje
     const rawAnalysis = safeJsonParse<Partial<WebsiteAnalysis>>(jsonStr, {});
 
     // Ensure all required properties are set with defaults
+    const mainTopics = Array.isArray(rawAnalysis.mainTopics) ? rawAnalysis.mainTopics : [];
+    const keyServices = Array.isArray(rawAnalysis.keyServices) ? rawAnalysis.keyServices : [];
+    const keyProducts = Array.isArray(rawAnalysis.keyProducts) ? rawAnalysis.keyProducts : [];
+
+    // Derive a meaningful industry context - NEVER use generic terms like "General"
+    let industryContext = rawAnalysis.industryContext;
+    if (!industryContext || industryContext.toLowerCase() === 'general' || industryContext.length < 5) {
+      // Try to derive industry from other data
+      if (mainTopics.length > 0) {
+        industryContext = mainTopics.slice(0, 2).join(' and ');
+        logger.debug(`Derived industry context from main topics: ${industryContext}`);
+      } else if (keyServices.length > 0) {
+        industryContext = keyServices[0];
+        logger.debug(`Derived industry context from key services: ${industryContext}`);
+      } else if (content.title) {
+        industryContext = content.title;
+        logger.debug(`Derived industry context from title: ${industryContext}`);
+      } else {
+        // Last resort - will trigger AI fallback for subspecialties
+        industryContext = '';
+        logger.warn('Could not derive meaningful industry context - will rely on AI fallback');
+      }
+    }
+
     const analysis: WebsiteAnalysis = {
       url,
       title: rawAnalysis.title || content.title || 'Website',
       description: rawAnalysis.description || content.description || '',
-      mainTopics: Array.isArray(rawAnalysis.mainTopics) ? rawAnalysis.mainTopics : [],
+      mainTopics,
       targetAudience: Array.isArray(rawAnalysis.targetAudience) ? rawAnalysis.targetAudience : [],
-      industryContext: rawAnalysis.industryContext || 'General',
-      keyProducts: Array.isArray(rawAnalysis.keyProducts) ? rawAnalysis.keyProducts : [],
-      keyServices: Array.isArray(rawAnalysis.keyServices) ? rawAnalysis.keyServices : [],
+      industryContext: industryContext || '',
+      keyProducts,
+      keyServices,
       uniqueSellingPoints: Array.isArray(rawAnalysis.uniqueSellingPoints) ? rawAnalysis.uniqueSellingPoints : [],
       brandVoice: rawAnalysis.brandVoice || 'Professional',
       contentThemes: Array.isArray(rawAnalysis.contentThemes) ? rawAnalysis.contentThemes : [],
@@ -580,13 +604,20 @@ Only return the JSON array.`;
       ...(analysis.keyProducts || []).slice(0, 3),
     ].filter(Boolean);
 
-    // Determine the main topic from title or content
+    // Determine the main topic from title or content - avoid generic terms
     const mainTopic = analysis.title ||
                       content.headings[0] ||
                       analysis.mainTopics[0] ||
-                      'general services';
+                      '';
 
-    const industry = analysis.industryContext || 'general business';
+    // Use industry context directly - web search service will handle generic values
+    const industry = analysis.industryContext || '';
+
+    // Log what we're searching for
+    logger.info(`Web search context - Topic: "${mainTopic}", Industry: "${industry}"`);
+    if (!mainTopic && !industry) {
+      logger.warn('No meaningful topic or industry found - web searches may be limited');
+    }
 
     let webData: WebResearchData;
     const sources: Partial<DataSourceSummary> = {};
