@@ -19,6 +19,7 @@ import {
   URLResearchResult,
   WebsiteAnalysis,
   PeopleAlsoAskQuestion,
+  SubspecialtyInfo,
 } from '../types';
 import { createLogger } from '../utils/logger';
 import { getConfig } from '../utils/config';
@@ -540,26 +541,26 @@ Only return the JSON array.`;
 
     const industry = analysis.industryContext || 'general business';
 
+    let webData: WebResearchData;
+
     try {
       // Perform comprehensive web research including subspecialty discovery
-      const webData = await this.webSearch.performDeepResearch(
+      webData = await this.webSearch.performDeepResearch(
         mainTopic,
         industry,
         keywords
       );
 
-      logger.info(`Discovered ${webData.subspecialties.length} professional subspecialties`);
+      logger.info(`Discovered ${webData.subspecialties.length} professional subspecialties via web search`);
       if (webData.subspecialties.length > 0) {
         logger.debug(`Subspecialties: ${webData.subspecialties.map(s => s.name).join(', ')}`);
       }
-
-      return webData;
     } catch (error) {
-      logger.warn('Web search encountered errors, continuing with limited data');
+      logger.warn('Web search encountered errors, will use AI fallback');
       logger.debug(`Web search error: ${error instanceof Error ? error.message : String(error)}`);
 
-      // Return empty data structure if web search fails
-      return {
+      // Initialize empty data structure
+      webData = {
         paaQuestions: [],
         industryInsights: [],
         competitorInfo: [],
@@ -567,6 +568,102 @@ Only return the JSON array.`;
         subspecialties: [],
         riskProfiles: [],
       };
+    }
+
+    // CRITICAL: If web search returned no subspecialties, use AI to generate them
+    if (webData.subspecialties.length === 0) {
+      logger.info('Web search returned no subspecialties, using AI to generate professional types...');
+      const aiSubspecialties = await this.generateSubspecialtiesWithAI(analysis, content);
+      webData.subspecialties = aiSubspecialties;
+      logger.success(`AI generated ${aiSubspecialties.length} professional subspecialties`);
+    }
+
+    return webData;
+  }
+
+  /**
+   * Generate subspecialties using AI when web search is unavailable
+   * This uses Claude's knowledge to identify professional subspecialties
+   */
+  private async generateSubspecialtiesWithAI(
+    analysis: WebsiteAnalysis,
+    content: ScrapedContent
+  ): Promise<SubspecialtyInfo[]> {
+    // Extract profession from industry context
+    const industryLower = (analysis.industryContext || '').toLowerCase();
+    const titleLower = (analysis.title || '').toLowerCase();
+    const combined = `${titleLower} ${industryLower}`;
+
+    // Try to identify the profession
+    let profession = 'professional';
+    const professionPatterns = [
+      /(\w+ologist)/i,  // pathologist, radiologist
+      /(\w+ist)/i,      // dentist, therapist
+      /(\w+or)/i,       // doctor
+      /(\w+ian)/i,      // physician, technician
+    ];
+
+    for (const pattern of professionPatterns) {
+      const match = combined.match(pattern);
+      if (match) {
+        profession = match[1];
+        break;
+      }
+    }
+
+    const prompt = `You are an expert in professional subspecialties and insurance risk assessment. Based on the following website context, identify the key professional subspecialties that exist within this field.
+
+WEBSITE CONTEXT:
+- Title: ${analysis.title || 'Unknown'}
+- Industry: ${analysis.industryContext || 'Professional services'}
+- Target Audience: ${analysis.targetAudience.join(', ') || 'Professionals'}
+- Main Topics: ${analysis.mainTopics.join(', ') || 'Professional services'}
+
+CONTENT EXCERPTS:
+${content.headings.slice(0, 20).join('\n')}
+${content.paragraphs.slice(0, 10).join('\n')}
+
+TASK:
+Identify 5-8 distinct professional subspecialties or types within this field. For each subspecialty, provide:
+1. The specific name/title
+2. A brief description of what they do
+3. Key risk factors relevant to their work
+4. Common concerns or challenges they face
+
+Return a JSON array with this structure:
+[
+  {
+    "name": "Subspecialty name (e.g., Dermatopathologist, Cytopathologist)",
+    "description": "Brief description of this subspecialty",
+    "riskFactors": ["risk factor 1", "risk factor 2", "risk factor 3"],
+    "commonConcerns": ["concern 1", "concern 2"]
+  }
+]
+
+IMPORTANT:
+- Focus on REAL subspecialties that exist in this profession
+- Include a range from high-risk to lower-risk specialties
+- Make the subspecialties diverse and distinct
+- Return ONLY the JSON array, no other text`;
+
+    try {
+      const response = await this.callClaude(prompt);
+      const jsonStr = extractJson(response) || response;
+      const subspecialties = safeJsonParse<SubspecialtyInfo[]>(jsonStr, []);
+
+      // Validate and clean the results
+      return subspecialties
+        .filter(s => s && s.name && s.description)
+        .map(s => ({
+          name: s.name,
+          description: s.description || '',
+          riskFactors: Array.isArray(s.riskFactors) ? s.riskFactors : [],
+          commonConcerns: Array.isArray(s.commonConcerns) ? s.commonConcerns : [],
+        }))
+        .slice(0, 8); // Limit to 8 subspecialties
+    } catch (error) {
+      logger.warn(`AI subspecialty generation failed: ${error instanceof Error ? error.message : String(error)}`);
+      return [];
     }
   }
 
