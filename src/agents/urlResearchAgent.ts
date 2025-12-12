@@ -353,22 +353,25 @@ Be thorough and specific based on the scraped content. Return ONLY the JSON obje
     logger.debug('Website analysis raw response length: ' + response.length);
 
     const jsonStr = extractJson(response) || response;
-    const analysis = safeJsonParse<WebsiteAnalysis>(jsonStr, {
-      url,
-      title: content.title,
-      description: content.description,
-      mainTopics: [],
-      targetAudience: [],
-      industryContext: 'Unknown',
-      keyProducts: [],
-      keyServices: [],
-      uniqueSellingPoints: [],
-      brandVoice: 'Professional',
-      contentThemes: [],
-    });
+    const rawAnalysis = safeJsonParse<Partial<WebsiteAnalysis>>(jsonStr, {});
 
-    // Ensure URL is set
-    analysis.url = url;
+    // Ensure all required properties are set with defaults
+    const analysis: WebsiteAnalysis = {
+      url,
+      title: rawAnalysis.title || content.title || 'Website',
+      description: rawAnalysis.description || content.description || '',
+      mainTopics: Array.isArray(rawAnalysis.mainTopics) ? rawAnalysis.mainTopics : [],
+      targetAudience: Array.isArray(rawAnalysis.targetAudience) ? rawAnalysis.targetAudience : [],
+      industryContext: rawAnalysis.industryContext || 'General',
+      keyProducts: Array.isArray(rawAnalysis.keyProducts) ? rawAnalysis.keyProducts : [],
+      keyServices: Array.isArray(rawAnalysis.keyServices) ? rawAnalysis.keyServices : [],
+      uniqueSellingPoints: Array.isArray(rawAnalysis.uniqueSellingPoints) ? rawAnalysis.uniqueSellingPoints : [],
+      brandVoice: rawAnalysis.brandVoice || 'Professional',
+      contentThemes: Array.isArray(rawAnalysis.contentThemes) ? rawAnalysis.contentThemes : [],
+    };
+
+    // Log what we got for debugging
+    logger.debug(`Analysis result: ${analysis.mainTopics.length} topics, ${analysis.targetAudience.length} audience segments`);
 
     // Log if we got minimal data
     if (analysis.mainTopics.length === 0) {
