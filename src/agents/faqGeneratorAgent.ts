@@ -457,14 +457,17 @@ Return ONLY the JSON object, no additional text.`;
 
     const response = await this.callClaude(prompt);
     const jsonStr = extractJson(response) || response;
-    const rawCategory = safeJsonParse<RawFAQCategory>(jsonStr, {
-      name: categoryName,
-      description: `FAQs about ${categoryName}`,
-      faqs: [],
-    });
+    const rawCategory = safeJsonParse<Partial<RawFAQCategory>>(jsonStr, {});
+
+    // Ensure faqs array exists
+    const rawFaqs = Array.isArray(rawCategory.faqs) ? rawCategory.faqs : [];
+
+    if (rawFaqs.length === 0) {
+      logger.warn(`No FAQs parsed for category: ${categoryName}`);
+    }
 
     // Transform to proper types with IDs
-    const faqs: FAQItem[] = rawCategory.faqs.map(faq => ({
+    const faqs: FAQItem[] = rawFaqs.map(faq => ({
       id: generateSimpleId(),
       question: faq.question,
       answer: faq.answer,

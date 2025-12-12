@@ -4,9 +4,10 @@
  * This agent performs deep research on a website URL:
  * 1. Scrapes the main page and discovers internal links
  * 2. Scrapes additional related pages for comprehensive understanding
- * 3. Analyzes the website's purpose, target audience, and key offerings
- * 4. Generates "People Also Ask" style questions based on thorough research
- * 5. Identifies competitive insights and industry context
+ * 3. Performs WEB SEARCH to gather external data (PAA questions, industry insights)
+ * 4. Analyzes the website's purpose, target audience, and key offerings
+ * 5. Generates "People Also Ask" questions from REAL web search data
+ * 6. Identifies competitive insights and industry context
  */
 
 import Anthropic from '@anthropic-ai/sdk';
@@ -22,6 +23,7 @@ import {
 import { createLogger } from '../utils/logger';
 import { getConfig } from '../utils/config';
 import { cleanText, truncate, extractDomain, retryWithBackoff, extractJson, safeJsonParse, sleep } from '../utils/helpers';
+import { createWebSearchService, WebSearchService, WebResearchData } from '../services/webSearchService';
 
 const logger = createLogger('URLResearchAgent');
 
@@ -43,6 +45,7 @@ interface ScrapedPage {
 export class URLResearchAgent {
   private config: AgentConfig;
   private anthropic: Anthropic;
+  private webSearch: WebSearchService;
   private maxPagesToScrape: number = 5; // Scrape up to 5 pages for deeper research
 
   constructor() {
@@ -57,6 +60,7 @@ export class URLResearchAgent {
     this.anthropic = new Anthropic({
       apiKey: appConfig.anthropic.apiKey,
     });
+    this.webSearch = createWebSearchService();
   }
 
   /**
@@ -86,10 +90,19 @@ export class URLResearchAgent {
       const websiteAnalysis = await this.analyzeWebsite(url, combinedContent);
       logger.success('Website analysis complete');
 
-      // Step 5: Generate People Also Ask questions based on thorough research
-      logger.info('Generating People Also Ask questions from research...');
-      const peopleAlsoAsk = await this.generatePeopleAlsoAsk(websiteAnalysis, combinedContent);
-      logger.success(`Generated ${peopleAlsoAsk.length} PAA questions`);
+      // Step 5: PERFORM WEB SEARCH for external research data
+      logger.info('Performing web search for external research data...');
+      const webResearchData = await this.performWebResearch(websiteAnalysis, combinedContent);
+      logger.success(`Web search complete: ${webResearchData.paaQuestions.length} PAA questions, ${webResearchData.industryInsights.length} industry insights`);
+
+      // Step 6: Generate People Also Ask questions - combining web search results with AI generation
+      logger.info('Generating People Also Ask questions from web research...');
+      const peopleAlsoAsk = await this.generatePeopleAlsoAskWithWebData(
+        websiteAnalysis,
+        combinedContent,
+        webResearchData
+      );
+      logger.success(`Generated ${peopleAlsoAsk.length} PAA questions (from web + AI)`);
 
       // Validate we have enough data
       if (peopleAlsoAsk.length === 0) {
@@ -500,6 +513,125 @@ Only return the JSON array.`;
         searchIntent: q.searchIntent || 'informational',
         estimatedRelevance: q.estimatedRelevance || 0.7,
       }));
+  }
+
+  /**
+   * Perform web search to gather external research data
+   */
+  private async performWebResearch(
+    analysis: WebsiteAnalysis,
+    content: ScrapedContent
+  ): Promise<WebResearchData> {
+    // Build search keywords from website analysis
+    const keywords: string[] = [
+      ...analysis.mainTopics.slice(0, 5),
+      ...analysis.targetAudience.slice(0, 3),
+      ...(analysis.keyServices || []).slice(0, 3),
+      ...(analysis.keyProducts || []).slice(0, 3),
+    ].filter(Boolean);
+
+    // Determine the main topic from title or content
+    const mainTopic = analysis.title ||
+                      content.headings[0] ||
+                      analysis.mainTopics[0] ||
+                      'general services';
+
+    const industry = analysis.industryContext || 'general business';
+
+    try {
+      // Perform comprehensive web research
+      const webData = await this.webSearch.performDeepResearch(
+        mainTopic,
+        industry,
+        keywords
+      );
+
+      return webData;
+    } catch (error) {
+      logger.warn('Web search encountered errors, continuing with limited data');
+      logger.debug(`Web search error: ${error instanceof Error ? error.message : String(error)}`);
+
+      // Return empty data structure if web search fails
+      return {
+        paaQuestions: [],
+        industryInsights: [],
+        competitorInfo: [],
+        relatedTopics: [],
+      };
+    }
+  }
+
+  /**
+   * Generate PAA questions using web search data + AI enhancement
+   */
+  private async generatePeopleAlsoAskWithWebData(
+    analysis: WebsiteAnalysis,
+    content: ScrapedContent,
+    webData: WebResearchData
+  ): Promise<PeopleAlsoAskQuestion[]> {
+    const allQuestions: PeopleAlsoAskQuestion[] = [];
+
+    // Convert web search PAA questions to our format
+    for (const paa of webData.paaQuestions) {
+      allQuestions.push({
+        question: paa.question,
+        relatedTopics: [paa.source],
+        searchIntent: this.inferSearchIntent(paa.question),
+        estimatedRelevance: 0.9, // High relevance - from real search
+      });
+    }
+
+    logger.info(`Got ${allQuestions.length} questions from web search`);
+
+    // If we have fewer than 15 questions from web search, supplement with AI
+    if (allQuestions.length < 15) {
+      logger.info('Supplementing with AI-generated questions...');
+      const aiQuestions = await this.generatePeopleAlsoAsk(analysis, content);
+
+      // Add AI questions that aren't duplicates
+      const existingQuestions = new Set(
+        allQuestions.map(q => q.question.toLowerCase().trim())
+      );
+
+      for (const aiQ of aiQuestions) {
+        const normalized = aiQ.question.toLowerCase().trim();
+        if (!existingQuestions.has(normalized)) {
+          // Mark AI-generated questions with slightly lower relevance
+          allQuestions.push({
+            ...aiQ,
+            estimatedRelevance: Math.min(aiQ.estimatedRelevance, 0.8),
+          });
+          existingQuestions.add(normalized);
+        }
+      }
+    }
+
+    // Sort by relevance and return top 25
+    return allQuestions
+      .sort((a, b) => b.estimatedRelevance - a.estimatedRelevance)
+      .slice(0, 25);
+  }
+
+  /**
+   * Infer search intent from question text
+   */
+  private inferSearchIntent(question: string): 'informational' | 'navigational' | 'transactional' | 'commercial' {
+    const q = question.toLowerCase();
+
+    if (q.includes('buy') || q.includes('purchase') || q.includes('order') || q.includes('get')) {
+      return 'transactional';
+    }
+    if (q.includes('best') || q.includes('top') || q.includes('compare') || q.includes('vs') || q.includes('review')) {
+      return 'commercial';
+    }
+    if (q.includes('how much') || q.includes('cost') || q.includes('price') || q.includes('pricing')) {
+      return 'commercial';
+    }
+    if (q.includes('where') || q.includes('find') || q.includes('locate') || q.includes('near me')) {
+      return 'navigational';
+    }
+
+    return 'informational';
   }
 
   /**
