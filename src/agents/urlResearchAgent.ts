@@ -646,8 +646,13 @@ Only return the JSON array.`;
     let webSearchWorked = false;
 
     try {
+      // Ensure web search is initialized
+      if (!this.webSearch) {
+        this.initWebSearch();
+      }
+
       // Perform comprehensive web research including subspecialty discovery
-      webData = await this.webSearch.performDeepResearch(
+      webData = await this.webSearch!.performDeepResearch(
         mainTopic,
         industry,
         keywords
