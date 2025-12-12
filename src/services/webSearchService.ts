@@ -403,9 +403,22 @@ export class WebSearchService {
         1000
       );
 
-      return this.parseDuckDuckGoResults(response.data);
+      // Debug: Log response status and HTML length
+      logger.debug(`DuckDuckGo response status: ${response.status}, HTML length: ${response.data?.length || 0}`);
+
+      // Debug: Check if we got a CAPTCHA or blocking page
+      const htmlLower = (response.data || '').toLowerCase();
+      if (htmlLower.includes('captcha') || htmlLower.includes('robot') || htmlLower.includes('blocked')) {
+        logger.warn('DuckDuckGo may be blocking requests (CAPTCHA/bot detection)');
+        logger.debug(`Response contains blocking keywords. First 500 chars: ${response.data?.substring(0, 500)}`);
+      }
+
+      const results = this.parseDuckDuckGoResults(response.data);
+      logger.debug(`Parsed ${results.length} results from DuckDuckGo for query: "${query}"`);
+
+      return results;
     } catch (error) {
-      logger.debug(`Search request failed: ${error instanceof Error ? error.message : String(error)}`);
+      logger.warn(`Search request failed for "${query}": ${error instanceof Error ? error.message : String(error)}`);
       return [];
     }
   }
@@ -417,8 +430,28 @@ export class WebSearchService {
     const results: SearchResult[] = [];
     const $ = cheerio.load(html);
 
+    // Debug: Log what selectors we find
+    const resultCount = $('.result').length;
+    const linkCount = $('.result__a').length;
+    const zeroClickCount = $('.zci__result').length;
+
+    if (resultCount === 0 && linkCount === 0) {
+      logger.debug(`No .result or .result__a elements found. Page may have different structure.`);
+      logger.debug(`Found ${zeroClickCount} .zci__result elements`);
+
+      // Try alternative selectors that DuckDuckGo might use
+      const altSelectors = ['.results_links', '.result__body', '.web-result', 'article'];
+      for (const sel of altSelectors) {
+        const count = $(sel).length;
+        if (count > 0) {
+          logger.debug(`Found ${count} elements with selector: ${sel}`);
+        }
+      }
+    }
+
+    // Primary selector: .result
     $('.result').each((_, element) => {
-      const titleEl = $(element).find('.result__title a');
+      const titleEl = $(element).find('.result__title a, .result__a');
       const snippetEl = $(element).find('.result__snippet');
 
       const title = titleEl.text().trim();
@@ -437,6 +470,27 @@ export class WebSearchService {
         results.push({ title, url: cleanUrl, snippet });
       }
     });
+
+    // Fallback: try .result__a directly if no results
+    if (results.length === 0) {
+      $('.result__a').each((_, element) => {
+        const title = $(element).text().trim();
+        const url = $(element).attr('href') || '';
+        const parent = $(element).closest('.result, .results_links_deep');
+        const snippet = parent.find('.result__snippet').text().trim();
+
+        if (title && url) {
+          let cleanUrl = url;
+          if (url.includes('uddg=')) {
+            const match = url.match(/uddg=([^&]+)/);
+            if (match) {
+              cleanUrl = decodeURIComponent(match[1]);
+            }
+          }
+          results.push({ title, url: cleanUrl, snippet: snippet || title });
+        }
+      });
+    }
 
     return results;
   }
