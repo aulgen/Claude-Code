@@ -379,6 +379,106 @@ CRITICAL: Create exactly ${definitions.length} personas, one for each predefined
   }
 
   /**
+   * Select diverse subspecialties to maximize audience coverage
+   *
+   * Selection criteria:
+   * 1. Maximize diversity of risk factors (different risk profiles)
+   * 2. Maximize diversity of concerns (different pain points)
+   * 3. Prioritize subspecialties with more detailed information
+   * 4. Ensure broad coverage across the profession
+   */
+  private selectDiverseSubspecialties(
+    subspecialties: SubspecialtyInfo[],
+    maxCount: number
+  ): { selected: SubspecialtyInfo[]; selectionRationale: string } {
+    if (subspecialties.length <= maxCount) {
+      return {
+        selected: subspecialties,
+        selectionRationale: 'All discovered subspecialties included (fewer than persona slots).',
+      };
+    }
+
+    logger.info(`Selecting ${maxCount} diverse subspecialties from ${subspecialties.length} discovered...`);
+
+    // Score each subspecialty based on information richness
+    const scored = subspecialties.map(sub => {
+      let score = 0;
+
+      // More risk factors = more specialized/unique
+      score += sub.riskFactors.length * 2;
+
+      // More concerns = better defined persona needs
+      score += sub.commonConcerns.length * 3;
+
+      // Longer description = more information available
+      score += Math.min(sub.description.length / 100, 5);
+
+      // Extract unique keywords from description for diversity tracking
+      const keywords = sub.description.toLowerCase()
+        .split(/\s+/)
+        .filter(w => w.length > 4);
+
+      return { subspecialty: sub, score, keywords };
+    });
+
+    // Sort by score descending
+    scored.sort((a, b) => b.score - a.score);
+
+    // Select diverse subspecialties using greedy diversity selection
+    const selected: SubspecialtyInfo[] = [];
+    const usedRiskFactors = new Set<string>();
+    const usedConcernKeywords = new Set<string>();
+
+    for (const item of scored) {
+      if (selected.length >= maxCount) break;
+
+      // Calculate diversity score - prefer subspecialties with NEW risk factors and concerns
+      const newRiskFactors = item.subspecialty.riskFactors.filter(rf =>
+        !usedRiskFactors.has(rf.toLowerCase())
+      );
+      const newConcerns = item.subspecialty.commonConcerns.filter(c => {
+        const words = c.toLowerCase().split(/\s+/);
+        return words.some(w => w.length > 4 && !usedConcernKeywords.has(w));
+      });
+
+      // Prioritize if it brings new risk factors or concerns
+      const diversityScore = newRiskFactors.length + newConcerns.length;
+
+      // Accept if it adds diversity OR if we haven't filled slots yet and it's high-scoring
+      if (diversityScore > 0 || selected.length < Math.ceil(maxCount / 2)) {
+        selected.push(item.subspecialty);
+
+        // Track used risk factors and concerns
+        item.subspecialty.riskFactors.forEach(rf => usedRiskFactors.add(rf.toLowerCase()));
+        item.subspecialty.commonConcerns.forEach(c => {
+          c.toLowerCase().split(/\s+/).forEach(w => {
+            if (w.length > 4) usedConcernKeywords.add(w);
+          });
+        });
+      }
+    }
+
+    // If we still need more, fill from remaining high-scoring ones
+    if (selected.length < maxCount) {
+      for (const item of scored) {
+        if (selected.length >= maxCount) break;
+        if (!selected.includes(item.subspecialty)) {
+          selected.push(item.subspecialty);
+        }
+      }
+    }
+
+    const rationale = `Selected ${selected.length} subspecialties from ${subspecialties.length} to maximize audience diversity. ` +
+      `Selection prioritized: unique risk factors (${usedRiskFactors.size} covered), ` +
+      `diverse concerns (${usedConcernKeywords.size} unique topics), and information richness.`;
+
+    logger.info(rationale);
+    logger.debug(`Selected: ${selected.map(s => s.name).join(', ')}`);
+
+    return { selected, selectionRationale: rationale };
+  }
+
+  /**
    * Build the prompt for persona generation
    */
   private buildPersonaPrompt(
@@ -419,14 +519,28 @@ CRITICAL: Create exactly ${definitions.length} personas, one for each predefined
     let subspecialtyContext = '';
     let subspecialtyInstructions = '';
     if (subspecialties && subspecialties.length > 0) {
-      subspecialtyContext = `\n\n## Professional Subspecialties Discovered (IMPORTANT)
+      // Select diverse subspecialties to maximize audience coverage
+      // We need (count - 1) subspecialties since Persona 1 is the main/general persona
+      const subspecialtySlots = count - 1;
+      const { selected: selectedSubspecialties, selectionRationale } = this.selectDiverseSubspecialties(
+        subspecialties,
+        subspecialtySlots
+      );
 
-The following professional subspecialties/types were discovered through web research. You MUST create personas that represent DIFFERENT subspecialties to ensure comprehensive coverage:
+      const totalDiscovered = subspecialties.length;
+      const selectionNote = totalDiscovered > selectedSubspecialties.length
+        ? `\n\n*Note: ${selectedSubspecialties.length} subspecialties were selected from ${totalDiscovered} discovered to maximize audience diversity. ${selectionRationale}*`
+        : '';
 
-${subspecialties.map((s, i) => `${i + 1}. **${s.name}**
+      subspecialtyContext = `\n\n## Professional Subspecialties Selected for Personas (IMPORTANT)
+
+The following ${selectedSubspecialties.length} subspecialties were **strategically selected** from ${totalDiscovered} discovered to represent the widest possible audience diversity. You MUST create one persona for EACH of these subspecialties:
+
+${selectedSubspecialties.map((s, i) => `${i + 1}. **${s.name}**
    - Description: ${s.description.substring(0, 200)}
    - Risk factors: ${s.riskFactors.join(', ') || 'Various'}
-   - Common concerns: ${s.commonConcerns.slice(0, 2).join('; ') || 'Industry-specific concerns'}`).join('\n\n')}
+   - Common concerns: ${s.commonConcerns.slice(0, 3).join('; ') || 'Industry-specific concerns'}`).join('\n\n')}
+${selectionNote}
 `;
       subspecialtyInstructions = `
 **CRITICAL PERSONA REQUIREMENT - MAIN PERSONA FIRST:**
@@ -435,12 +549,11 @@ ${subspecialties.map((s, i) => `${i + 1}. **${s.name}**
   - They should have broad concerns applicable to the overall profession
   - Title should be "The [General/Main] [Profession]" (e.g., "The General Pathologist")
 
-- **PERSONAS 2-${count} should be SUBSPECIALTY-SPECIFIC personas** from the list above
-- Each subspecialty persona MUST represent a DIFFERENT professional subspecialty
-- Do NOT create duplicate subspecialty personas
+- **PERSONAS 2-${count} MUST each represent ONE of the ${selectedSubspecialties.length} subspecialties listed above**
+- These subspecialties were selected to maximize diversity - create exactly one persona for each
 - Include the subspecialty in the persona's title (e.g., "The Dermatopathologist", "The Cytopathologist")
 - Tailor their challenges, concerns, and questions to their specific subspecialty
-- If you have more subspecialty slots than subspecialties, create personas at different career stages (new practitioner, mid-career, retiring)
+- Use the risk factors and concerns listed above to inform each persona's pain points
 `;
     } else {
       // Even without subspecialties, ensure main persona is first

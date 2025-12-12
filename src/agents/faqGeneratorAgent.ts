@@ -83,19 +83,45 @@ export class FAQGeneratorAgent {
     logger.section('FAQ Content Generator Agent');
     logger.info('Generating FAQ content...');
 
+    // Validate input
+    if (!input || !input.websiteAnalysis) {
+      logger.error('Invalid input: websiteAnalysis is required');
+      return {
+        success: false,
+        error: 'Invalid input: websiteAnalysis is required',
+      };
+    }
+
+    if (!input.personas || input.personas.length === 0) {
+      logger.warn('No personas provided - FAQ generation may be less targeted');
+    }
+
     try {
       // Step 0: Scan source URL for internal links (if URL is provided)
-      if (input.websiteAnalysis.url) {
+      if (input.websiteAnalysis?.url) {
         this.sourceUrl = input.websiteAnalysis.url;
         logger.info('Scanning source URL for internal links...');
-        await this.scanForInternalLinks(input.websiteAnalysis.url);
-        logger.success(`Found ${this.internalLinks.length} internal links`);
+        try {
+          await this.scanForInternalLinks(input.websiteAnalysis.url);
+          logger.success(`Found ${this.internalLinks.length} internal links`);
+        } catch (scanError) {
+          logger.warn('Could not scan for internal links, continuing without them');
+          this.internalLinks = [];
+        }
       }
 
       // Step 1: Determine FAQ categories
       logger.info('Determining FAQ categories...');
-      const categoryNames = await this.determineFAQCategories(input.websiteAnalysis, input.personas);
+      const categoryNames = await this.determineFAQCategories(input.websiteAnalysis, input.personas || []);
       logger.success(`Identified ${categoryNames.length} categories`);
+
+      if (categoryNames.length === 0) {
+        logger.error('No FAQ categories could be determined');
+        return {
+          success: false,
+          error: 'Failed to determine FAQ categories',
+        };
+      }
 
       // Step 2: Generate FAQ content for each category
       const categories: FAQCategory[] = [];
@@ -103,27 +129,47 @@ export class FAQGeneratorAgent {
         const categoryName = categoryNames[i];
         logger.progress('Generating FAQs', i + 1, categoryNames.length, categoryName);
 
-        const category = await this.generateFAQsForCategory(
-          categoryName,
-          input.websiteAnalysis,
-          input.personas,
-          input.peopleAlsoAsk,
-          input.maxFAQsPerCategory || 5
-        );
+        try {
+          const category = await this.generateFAQsForCategory(
+            categoryName,
+            input.websiteAnalysis,
+            input.personas || [],
+            input.peopleAlsoAsk || [],
+            input.maxFAQsPerCategory || 5
+          );
 
-        // Enrich FAQs with internal links
-        const enrichedFAQs = await this.enrichFAQsWithInternalLinks(category.faqs);
-        category.faqs = enrichedFAQs;
+          // Enrich FAQs with internal links
+          const enrichedFAQs = await this.enrichFAQsWithInternalLinks(category.faqs || []);
+          category.faqs = enrichedFAQs;
 
-        categories.push(category);
+          categories.push(category);
+          logger.debug(`Generated ${category.faqs.length} FAQs for category: ${categoryName}`);
+        } catch (categoryError) {
+          logger.warn(`Failed to generate FAQs for category "${categoryName}": ${categoryError instanceof Error ? categoryError.message : String(categoryError)}`);
+          // Continue with other categories instead of failing completely
+        }
+      }
+
+      // Check if we generated any FAQs
+      if (categories.length === 0) {
+        logger.error('No FAQ categories were generated');
+        return {
+          success: false,
+          error: 'Failed to generate any FAQ categories',
+        };
+      }
+
+      const totalFAQs = categories.reduce((sum, cat) => sum + (cat.faqs?.length || 0), 0);
+      if (totalFAQs === 0) {
+        logger.warn('No FAQs were generated in any category');
       }
 
       // Calculate coverage statistics
-      const coverageByPersona = this.calculatePersonaCoverage(categories, input.personas);
+      const coverageByPersona = this.calculatePersonaCoverage(categories, input.personas || []);
 
       const result: FAQContentResult = {
         categories,
-        totalFAQs: categories.reduce((sum, cat) => sum + cat.faqs.length, 0),
+        totalFAQs,
         coverageByPersona,
         generatedAt: new Date(),
       };
@@ -346,10 +392,11 @@ Return ONLY the enhanced answer text with embedded markdown links. Do not includ
     analysis: WebsiteAnalysis,
     personas: Persona[]
   ): Promise<string[]> {
-    const personaNeeds = personas.flatMap(p => [
-      ...p.painPoints.challenges,
-      ...p.goals.primaryGoals,
-    ]);
+    // Safely extract persona needs with null checks
+    const personaNeeds = (personas || []).flatMap(p => [
+      ...(p.painPoints?.challenges || []),
+      ...(p.goals?.primaryGoals || []),
+    ]).filter(Boolean);
 
     const prompt = `Based on this website analysis and user needs, determine 5-7 FAQ categories.
 
@@ -397,14 +444,15 @@ Return ONLY a JSON array of category names, e.g.:
     paaQuestions: PeopleAlsoAskQuestion[],
     maxFAQs: number
   ): Promise<FAQCategory> {
-    const personaContext = personas.map(p =>
-      `${p.name} (${p.title}): Questions - ${p.typicalQuestions.slice(0, 3).join('; ')}`
-    ).join('\n');
+    const personaContext = personas.map(p => {
+      const questions = p.typicalQuestions?.slice(0, 3).join('; ') || 'General questions about the service';
+      return `${p.name} (${p.title}): Questions - ${questions}`;
+    }).join('\n');
 
-    const relevantPAA = paaQuestions
+    const relevantPAA = (paaQuestions || [])
       .slice(0, 10)
       .map(q => `- ${q.question}`)
-      .join('\n');
+      .join('\n') || 'No specific questions available';
 
     // Include available internal links for context
     const linkTopics = [...new Set(this.internalLinks.flatMap(l => l.topics))].slice(0, 20);
@@ -511,13 +559,15 @@ Return ONLY the JSON object, no additional text.`;
   ): Record<string, number> {
     const coverage: Record<string, number> = {};
 
-    personas.forEach(p => {
-      coverage[p.name] = 0;
+    (personas || []).forEach(p => {
+      if (p?.name) {
+        coverage[p.name] = 0;
+      }
     });
 
-    categories.forEach(cat => {
-      cat.faqs.forEach(faq => {
-        faq.targetPersonas.forEach(personaName => {
+    (categories || []).forEach(cat => {
+      (cat.faqs || []).forEach(faq => {
+        (faq.targetPersonas || []).forEach(personaName => {
           if (coverage[personaName] !== undefined) {
             coverage[personaName]++;
           }
