@@ -58,6 +58,22 @@ export interface SubspecialtyInfo {
   commonConcerns: string[];
 }
 
+export type DataSourceType = 'web_search' | 'ai_generated' | 'website_scrape' | 'none';
+
+export interface DataSourceInfo {
+  source: DataSourceType;
+  count: number;
+  details?: string;
+}
+
+export interface DataSourceSummary {
+  subspecialties: DataSourceInfo;
+  paaQuestions: DataSourceInfo;
+  industryInsights: DataSourceInfo;
+  marketInfo: DataSourceInfo;
+  websiteContent: DataSourceInfo;
+}
+
 export interface URLResearchResult {
   websiteAnalysis: WebsiteAnalysis;
   peopleAlsoAsk: PeopleAlsoAskQuestion[];
@@ -66,6 +82,7 @@ export interface URLResearchResult {
   industryInsights?: string[];          // Industry trends and insights from web search
   rawContent: string;
   scrapedAt: Date;
+  dataSourceSummary?: DataSourceSummary;  // Shows where each data type came from
 }
 
 // ============================================
