@@ -18,6 +18,10 @@ export interface AppConfig {
     credentialsPath: string;
     folderId?: string;
   };
+  search: {
+    provider: 'duckduckgo' | 'serpapi' | 'none';
+    serpApiKey?: string;
+  };
   output: {
     dir: string;
   };
@@ -39,6 +43,15 @@ function getEnvVarOptional(key: string): string | undefined {
 }
 
 export function loadConfig(): AppConfig {
+  // Determine search provider based on available API keys
+  const serpApiKey = getEnvVarOptional('SERPAPI_KEY');
+  let searchProvider: AppConfig['search']['provider'] = 'duckduckgo';
+  if (serpApiKey) {
+    searchProvider = 'serpapi';
+  } else if (getEnvVarOptional('DISABLE_WEB_SEARCH') === 'true') {
+    searchProvider = 'none';
+  }
+
   return {
     anthropic: {
       apiKey: getEnvVar('ANTHROPIC_API_KEY'),
@@ -47,6 +60,10 @@ export function loadConfig(): AppConfig {
     google: {
       credentialsPath: getEnvVar('GOOGLE_CREDENTIALS_PATH', './credentials.json'),
       folderId: getEnvVarOptional('GOOGLE_DRIVE_FOLDER_ID'),
+    },
+    search: {
+      provider: searchProvider,
+      serpApiKey,
     },
     output: {
       dir: getEnvVar('OUTPUT_DIR', './output'),

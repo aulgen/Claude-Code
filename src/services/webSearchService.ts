@@ -12,9 +12,12 @@
 import axios from 'axios';
 import * as cheerio from 'cheerio';
 import { createLogger } from '../utils/logger';
+import { getConfig, AppConfig } from '../utils/config';
 import { sleep, retryWithBackoff } from '../utils/helpers';
 
 const logger = createLogger('WebSearchService');
+
+type SearchProvider = 'duckduckgo' | 'serpapi' | 'none';
 
 export interface SearchResult {
   title: string;
@@ -45,6 +48,28 @@ export interface WebResearchData {
 
 export class WebSearchService {
   private userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36';
+  private searchProvider: SearchProvider;
+  private serpApiKey?: string;
+
+  constructor() {
+    try {
+      const config = getConfig();
+      this.searchProvider = config.search.provider;
+      this.serpApiKey = config.search.serpApiKey;
+
+      if (this.searchProvider === 'serpapi' && this.serpApiKey) {
+        logger.info('Using SerpAPI for web searches (SERPAPI_KEY configured)');
+      } else if (this.searchProvider === 'none') {
+        logger.info('Web search disabled (DISABLE_WEB_SEARCH=true)');
+      } else {
+        logger.info('Using DuckDuckGo for web searches (set SERPAPI_KEY for more reliable results)');
+      }
+    } catch {
+      // Default to DuckDuckGo if config fails
+      this.searchProvider = 'duckduckgo';
+      logger.debug('Config not available, defaulting to DuckDuckGo');
+    }
+  }
 
   /**
    * Perform comprehensive web research for a topic/industry
@@ -379,9 +404,72 @@ export class WebSearchService {
   }
 
   /**
-   * Perform a web search using DuckDuckGo HTML
+   * Perform a web search using the configured provider
    */
   private async performSearch(query: string): Promise<SearchResult[]> {
+    // If search is disabled, return empty
+    if (this.searchProvider === 'none') {
+      return [];
+    }
+
+    // Use SerpAPI if configured
+    if (this.searchProvider === 'serpapi' && this.serpApiKey) {
+      return this.performSerpApiSearch(query);
+    }
+
+    // Default to DuckDuckGo
+    return this.performDuckDuckGoSearch(query);
+  }
+
+  /**
+   * Perform a web search using SerpAPI (reliable, paid service)
+   */
+  private async performSerpApiSearch(query: string): Promise<SearchResult[]> {
+    const encodedQuery = encodeURIComponent(query);
+    const url = `https://serpapi.com/search.json?q=${encodedQuery}&api_key=${this.serpApiKey}&engine=google`;
+
+    try {
+      const response = await retryWithBackoff(
+        async () => {
+          return axios.get(url, { timeout: 20000 });
+        },
+        2,
+        1000
+      );
+
+      const data = response.data;
+      const results: SearchResult[] = [];
+
+      // Extract organic results
+      if (data.organic_results && Array.isArray(data.organic_results)) {
+        for (const result of data.organic_results.slice(0, 10)) {
+          results.push({
+            title: result.title || '',
+            url: result.link || '',
+            snippet: result.snippet || '',
+          });
+        }
+      }
+
+      // Also extract "People Also Ask" if available
+      if (data.related_questions && Array.isArray(data.related_questions)) {
+        logger.debug(`SerpAPI found ${data.related_questions.length} related questions`);
+      }
+
+      logger.debug(`SerpAPI returned ${results.length} results for query: "${query}"`);
+      return results;
+    } catch (error) {
+      logger.warn(`SerpAPI search failed for "${query}": ${error instanceof Error ? error.message : String(error)}`);
+      // Fallback to DuckDuckGo on SerpAPI failure
+      logger.info('Falling back to DuckDuckGo...');
+      return this.performDuckDuckGoSearch(query);
+    }
+  }
+
+  /**
+   * Perform a web search using DuckDuckGo HTML (free, but may be blocked)
+   */
+  private async performDuckDuckGoSearch(query: string): Promise<SearchResult[]> {
     const encodedQuery = encodeURIComponent(query);
     const url = `https://html.duckduckgo.com/html/?q=${encodedQuery}`;
 
@@ -418,7 +506,7 @@ export class WebSearchService {
 
       return results;
     } catch (error) {
-      logger.warn(`Search request failed for "${query}": ${error instanceof Error ? error.message : String(error)}`);
+      logger.warn(`DuckDuckGo search failed for "${query}": ${error instanceof Error ? error.message : String(error)}`);
       return [];
     }
   }
