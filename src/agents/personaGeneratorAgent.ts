@@ -429,12 +429,30 @@ ${subspecialties.map((s, i) => `${i + 1}. **${s.name}**
    - Common concerns: ${s.commonConcerns.slice(0, 2).join('; ') || 'Industry-specific concerns'}`).join('\n\n')}
 `;
       subspecialtyInstructions = `
-**CRITICAL SUBSPECIALTY REQUIREMENT:**
-- Each persona MUST represent a DIFFERENT professional subspecialty from the list above
+**CRITICAL PERSONA REQUIREMENT - MAIN PERSONA FIRST:**
+- **PERSONA 1 MUST BE THE MAIN/GENERAL PERSONA** - This persona represents the GENERAL professional in this field (e.g., "The General Pathologist", "The Primary Care Physician", "The General Practitioner")
+  - This main persona should NOT be a subspecialist
+  - They should have broad concerns applicable to the overall profession
+  - Title should be "The [General/Main] [Profession]" (e.g., "The General Pathologist")
+
+- **PERSONAS 2-${count} should be SUBSPECIALTY-SPECIFIC personas** from the list above
+- Each subspecialty persona MUST represent a DIFFERENT professional subspecialty
 - Do NOT create duplicate subspecialty personas
 - Include the subspecialty in the persona's title (e.g., "The Dermatopathologist", "The Cytopathologist")
 - Tailor their challenges, concerns, and questions to their specific subspecialty
-- If you have more personas than subspecialties, create personas at different career stages (new practitioner, mid-career, retiring)
+- If you have more subspecialty slots than subspecialties, create personas at different career stages (new practitioner, mid-career, retiring)
+`;
+    } else {
+      // Even without subspecialties, ensure main persona is first
+      subspecialtyInstructions = `
+**CRITICAL PERSONA REQUIREMENT - MAIN PERSONA FIRST:**
+- **PERSONA 1 MUST BE THE MAIN/GENERAL PERSONA** - This persona represents the GENERAL professional or user in this field
+  - This main persona should represent the typical/average user
+  - They should have broad concerns applicable to the overall industry
+  - Title should reflect their general role (e.g., "The General Practitioner", "The Typical Customer")
+
+- **PERSONAS 2-${count} should represent different SEGMENTS or SPECIALIZATIONS** within the target audience
+- Vary their backgrounds, experience levels, and specific focus areas
 `;
     }
 
@@ -465,7 +483,11 @@ ${sampleContext}
 
 ## Instructions
 
-Create ${count} diverse personas that represent different segments of the target audience. Each persona should be unique in:
+Create ${count} diverse personas that represent different segments of the target audience.
+
+**IMPORTANT: The FIRST persona (Persona 1) must ALWAYS be the MAIN/GENERAL persona representing the broad profession, NOT a subspecialist.**
+
+Each persona should be unique in:
 1. Demographics and background
 2. Journey stage (awareness, consideration, decision, retention)
 3. Pain points and challenges
@@ -484,6 +506,8 @@ ${retryInstructions}
 ## Required JSON Output Format
 
 You MUST return a valid JSON array with exactly ${count} personas. Do not include any text before or after the JSON. Do not use markdown code fences. Start your response with [ and end with ].
+
+**REMINDER: Persona 1 = Main/General professional. Personas 2-${count} = Subspecialty-specific professionals.**
 
 Each persona in the array must have this exact structure:
 [
